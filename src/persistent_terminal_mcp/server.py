@@ -14,6 +14,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field, StringConstraints, ValidationError
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -21,13 +22,16 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .config import CredentialRef, Identifier, Port, Principal, Settings
 from .errors import ToolError
 from .executions import Executions
+from .identity_store import Identities
 from .models import ProfileInput, ProfilePatch
 from .profiles import Profiles, profile_info
 from .security import Security, audit
 from .sessions import Sessions
 from .ssh import SSHConnectionManager
 from .storage import Store
-from .web_connections import ROUTE as CONNECTION_ADMIN_ROUTE, register_connection_routes
+from .web_admin import ADMIN_ROUTES, WebAdmin
+from .web_connections import register_connection_routes
+from .web_identity import register_identity_routes
 
 owner: ContextVar[Principal] = ContextVar("ptmcp_principal")
 ResourceId = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")]
@@ -38,18 +42,24 @@ logger = logging.getLogger("terminal.server")
 
 
 class RequireBearer:
-    def __init__(self, app: ASGIApp, security: Security) -> None:
+    def __init__(self, app: ASGIApp, identities: Identities) -> None:
         self.app = app
-        self.security = security
+        self.identities = identities
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["path"] in {"/health", CONNECTION_ADMIN_ROUTE} or scope["path"].startswith(CONNECTION_ADMIN_ROUTE + "/"):
+        if scope["type"] != "http" or scope["path"] == "/health" or any(
+            scope["path"] == route or scope["path"].startswith(route + "/") for route in ADMIN_ROUTES
+        ):
             await self.app(scope, receive, send)
             return
         request = Request(scope)
         values = request.headers.getlist("authorization")
         value = values[0] if len(values) == 1 else ""
-        agent = await asyncio.to_thread(self.security.authenticate, value[7:]) if value.startswith("Bearer ") else None
+        try:
+            agent = await self.identities.authenticate(value[7:]) if value.startswith("Bearer ") else None
+        except SQLAlchemyError:
+            await JSONResponse({"error": "AUTH_UNAVAILABLE"}, 503)(scope, receive, send)
+            return
         if agent is None:
             response = JSONResponse({"error": "UNAUTHENTICATED"}, 401, {"WWW-Authenticate": "Bearer"})
             await response(scope, receive, send)
@@ -78,6 +88,8 @@ def authorities(settings: Settings) -> list[str]:
 def build_app(settings: Settings, approve: Approval | None = None) -> ASGIApp:
     security = Security(settings)
     store = Store(settings)
+    identities = Identities(store)
+    admin = WebAdmin(identities)
     mutations = asyncio.Lock()
     ssh = SSHConnectionManager(settings, security)
     profiles = Profiles(store, security, ssh, mutations)
@@ -269,7 +281,8 @@ def build_app(settings: Settings, approve: Approval | None = None) -> ASGIApp:
             await connection.execute(text("SELECT 1"))
         return JSONResponse({"ok": True, "service": "persistent-terminal-mcp"})
 
-    register_connection_routes(mcp, profiles, security)
+    register_connection_routes(mcp, profiles, security, admin)
+    register_identity_routes(mcp, admin, security)
     app = mcp.streamable_http_app()
     sdk_lifespan = app.router.lifespan_context
 
@@ -289,4 +302,4 @@ def build_app(settings: Settings, approve: Approval | None = None) -> ASGIApp:
             await store.engine.dispose()
 
     app.router.lifespan_context = lifespan
-    return RequireBearer(app, security)
+    return RequireBearer(app, identities)

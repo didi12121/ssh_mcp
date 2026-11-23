@@ -1,19 +1,20 @@
 import argparse
 import asyncio
-from contextlib import asynccontextmanager
 from getpass import getpass
-import hashlib
 import json
 import logging
 import os
 from pathlib import Path
-import secrets
 from datetime import UTC, datetime
 
 from cryptography.fernet import Fernet
+from sqlalchemy import func, select
 import uvicorn
 
 from .config import Settings
+from .identity_models import AccessToken, AgentIdentity
+from .migrations import schema_version
+from .models import Execution
 from .server import build_app
 from .storage import Store
 
@@ -36,6 +37,26 @@ async def migrate(settings: Settings) -> None:
     store = Store(settings)
     try:
         await store.start(reset_runtime=False)
+        async with store.transaction() as db:
+            agents = await db.scalar(select(func.count()).select_from(AgentIdentity))
+            legacy = await db.scalar(select(func.count()).select_from(AccessToken).where(AccessToken.legacy))
+        print(json.dumps({"schema": 2, "agents": agents, "legacy_tokens": legacy}))
+    finally:
+        await store.engine.dispose()
+
+
+async def preflight(settings: Settings) -> None:
+    store = Store(settings)
+    try:
+        async with store.engine.connect() as db:
+            version = await schema_version(db)
+            if version is not None:
+                count = await db.scalar(select(func.count()).select_from(Execution).where(
+                    Execution.mode == "foreground", Execution.status.in_(["PENDING", "RUNNING"]),
+                ))
+                if count:
+                    raise SystemExit(f"Upgrade blocked by {count} active foreground execution(s).")
+            print(json.dumps({"current_schema": version, "foreground_executions": 0}))
     finally:
         await store.engine.dispose()
 
@@ -45,7 +66,7 @@ def main() -> None:
     commands = parser.add_subparsers(dest="action")
     commands.add_parser("serve")
     commands.add_parser("migrate")
-    commands.add_parser("token")
+    commands.add_parser("preflight")
     master = commands.add_parser("master-key")
     master.add_argument("file", type=Path)
     encrypt = commands.add_parser("encrypt")
@@ -53,10 +74,6 @@ def main() -> None:
     encrypt.add_argument("file", type=Path)
     encrypt.add_argument("--key-file", type=Path)
     args = parser.parse_args()
-    if args.action == "token":
-        value = secrets.token_urlsafe(32)
-        print(json.dumps({"token": value, "token_sha256": hashlib.sha256(value.encode()).hexdigest()}))
-        return
     if args.action == "master-key":
         create_secret(args.file, Fernet.generate_key())
         return
@@ -69,12 +86,15 @@ def main() -> None:
     settings = Settings()
     if os.name == "posix":
         os.umask(0o077)
-    if args.action == "migrate":
-        asyncio.run(migrate(settings))
-        return
     handler = logging.StreamHandler()
     handler.setFormatter(JsonLog())
     logging.basicConfig(handlers=[handler], level=settings.log_level, force=True)
+    if args.action == "migrate":
+        asyncio.run(migrate(settings))
+        return
+    if args.action == "preflight":
+        asyncio.run(preflight(settings))
+        return
     uvicorn.run(build_app(settings), host=settings.host, port=settings.port, workers=1,
                 proxy_headers=False, log_config=None, access_log=False)
 

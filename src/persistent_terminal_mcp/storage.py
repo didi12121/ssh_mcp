@@ -1,14 +1,16 @@
-from sqlalchemy import event, select, text, update
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from .config import Settings
 from .errors import ToolError
-from .models import Base, Execution, Profile, Session
+from .migrations import upgrade
+from .models import Execution, Profile, Session
 
 
 class Store:
     def __init__(self, settings: Settings) -> None:
-        self.engine = create_async_engine(settings.db_url)
+        self.settings = settings
+        self.engine = create_async_engine(settings.db_url, hide_parameters=True)
         self.transaction = async_sessionmaker(self.engine, expire_on_commit=False)
         if self.engine.dialect.name == "sqlite":
             @event.listens_for(self.engine.sync_engine, "connect")
@@ -19,19 +21,7 @@ class Store:
                 cursor.close()
 
     async def start(self, reset_runtime: bool = True) -> None:
-        async with self.engine.begin() as connection:
-            if self.engine.dialect.name == "sqlite":
-                await connection.execute(text("PRAGMA journal_mode=WAL"))
-            await connection.execute(text(
-                "CREATE TABLE IF NOT EXISTS schema_versions (version INTEGER PRIMARY KEY)"
-            ))
-            result = await connection.execute(text("SELECT MAX(version) FROM schema_versions"))
-            version = result.scalar_one()
-            if version is None:
-                await connection.run_sync(Base.metadata.create_all)
-                await connection.execute(text("INSERT INTO schema_versions VALUES (1)"))
-            elif version != 1:
-                raise RuntimeError("Unsupported terminal database schema")
+        await upgrade(self.engine, self.settings)
         if not reset_runtime:
             return
         async with self.transaction.begin() as db:

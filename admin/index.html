@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="/admin.css">
   <script src="/admin.js" defer></script>
   <script src="/connections.js" defer></script>
+  <script src="/identity.js" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -25,6 +26,8 @@
     <nav id="sections" class="mode-switch section-nav" aria-label="管理功能" hidden>
       <button type="button" id="nav-keys" aria-controls="workspace" aria-pressed="true">密钥库</button>
       <button type="button" id="nav-connections" aria-controls="connections" aria-pressed="false">SSH 连接</button>
+      <button type="button" id="nav-agents" aria-controls="agents" aria-pressed="false">Agent 管理</button>
+      <button type="button" id="nav-tokens" aria-controls="tokens" aria-pressed="false">MCP Token</button>
     </nav>
     <div id="workspace" class="workspace" hidden>
       <section class="panel inventory" aria-labelledby="inventory-title">
@@ -117,6 +120,78 @@
         </div>
       </form>
     </div>
+    <div id="agents" class="workspace" hidden>
+      <section class="panel" aria-labelledby="agents-title">
+        <div class="section-title">
+          <h2 id="agents-title">Agent 管理</h2>
+          <button id="agents-refresh" type="button" class="quiet">刷新</button>
+        </div>
+        <label class="owner-label" for="agent-search">查找 Agent</label>
+        <input id="agent-search" type="search" maxlength="100" placeholder="名称或 Agent ID">
+        <p id="agents-empty" class="empty" hidden>没有匹配的 Agent。</p>
+        <ul id="agent-list" class="key-list"></ul>
+        <div id="agent-pages" class="key-actions" hidden>
+          <button id="agent-prev" type="button" class="quiet">上一页</button>
+          <button id="agent-next" type="button" class="quiet">下一页</button>
+        </div>
+      </section>
+      <form id="agent-form" class="panel">
+        <h2 id="agent-form-title">新增 Agent</h2>
+        <label for="agent-name">名称</label>
+        <input id="agent-name" name="name" required maxlength="100">
+        <label for="agent-id">Agent ID</label>
+        <input id="agent-id" name="owner_id" required maxlength="64" pattern="[A-Za-z][A-Za-z0-9_\-]{0,63}">
+        <label for="agent-description">备注</label>
+        <input id="agent-description" name="description" maxlength="500">
+        <label for="agent-targets">已知 SSH 主机</label>
+        <select id="agent-targets" name="targets" multiple size="3"></select>
+        <label for="agent-extra-targets">其他 SSH 主机 <span class="muted">逗号或换行分隔</span></label>
+        <textarea id="agent-extra-targets" name="extra_targets" rows="2" placeholder="server.example.internal"></textarea>
+        <label for="agent-credentials">允许的凭据</label>
+        <select id="agent-credentials" name="credentials" multiple size="3"></select>
+        <label for="agent-workspaces">工作区 <span class="muted">逗号或换行分隔</span></label>
+        <input id="agent-workspaces" name="workspaces" value="default">
+        <fieldset class="permission-fields">
+          <legend>执行权限</legend>
+          <label><input type="checkbox" name="shell"> 允许交互式 Shell</label>
+          <label><input type="checkbox" name="custom_commands"> 允许自定义独立命令</label>
+          <label><input type="checkbox" name="ssh_agent"> 允许 SSH Agent 认证</label>
+        </fieldset>
+        <label for="agent-commands">预定义命令 <span class="muted">JSON</span></label>
+        <textarea id="agent-commands" name="commands" rows="4" spellcheck="false" placeholder='{"uptime":["uptime"]}'></textarea>
+        <div class="key-actions">
+          <button type="submit">保存 Agent</button>
+          <button id="agent-cancel" type="button" class="quiet" hidden>取消编辑</button>
+        </div>
+      </form>
+    </div>
+    <section id="tokens" class="panel" aria-labelledby="tokens-title" hidden>
+      <div class="section-title">
+        <h2 id="tokens-title">MCP Token</h2>
+        <button id="token-create" type="button">创建 Token</button>
+      </div>
+      <div class="token-filters">
+        <div>
+          <label class="owner-label" for="token-filter-owner">Agent ID</label>
+          <input id="token-filter-owner" list="token-agent-options" placeholder="全部 Agent">
+        </div>
+        <div>
+          <label class="owner-label" for="token-filter-status">状态</label>
+          <select id="token-filter-status">
+            <option value="">所有状态</option><option value="ACTIVE">有效</option>
+            <option value="EXPIRED">过期</option><option value="REVOKED">撤销</option>
+          </select>
+        </div>
+        <button id="tokens-refresh" type="button" class="quiet">刷新</button>
+      </div>
+      <datalist id="token-agent-options"></datalist>
+      <p id="tokens-empty" class="empty" hidden>没有匹配的 Token。</p>
+      <ul id="token-list" class="key-list"></ul>
+      <div id="token-pages" class="key-actions" hidden>
+        <button id="token-prev" type="button" class="quiet">上一页</button>
+        <button id="token-next" type="button" class="quiet">下一页</button>
+      </div>
+    </section>
     <p id="status" role="status" aria-live="polite"></p>
   </main>
   <dialog id="install-dialog" class="panel" aria-labelledby="install-title">
@@ -149,6 +224,35 @@
       <button id="copy-install" type="button">复制安装命令</button>
     </div>
     <p id="install-status" role="status" aria-live="polite"></p>
+  </dialog>
+  <dialog id="token-dialog" class="panel admin-dialog" aria-labelledby="token-dialog-title">
+    <div class="section-title">
+      <h2 id="token-dialog-title">创建 MCP Token</h2>
+      <button id="token-close" type="button" class="quiet">关闭</button>
+    </div>
+    <form id="token-form">
+      <label for="token-owner">所属 Agent ID</label>
+      <input id="token-owner" name="owner_id" list="token-agent-options" required>
+      <label for="token-name">Token 名称</label>
+      <input id="token-name" name="name" maxlength="100" required>
+      <label for="token-expiry">有效期</label>
+      <select id="token-expiry" name="expiry">
+        <option id="token-default-expiry" value="default">服务器默认</option>
+        <option value="1">1 天</option><option value="7">7 天</option>
+        <option value="30">30 天</option><option value="90">90 天</option>
+        <option value="custom">自定义到期时间</option><option value="never">永不过期</option>
+      </select>
+      <label id="token-custom-label" for="token-custom-expiry" hidden>到期时间（本地时间）</label>
+      <input id="token-custom-expiry" type="datetime-local" hidden>
+      <button type="submit">创建 Token</button>
+    </form>
+    <div id="token-reveal" hidden>
+      <p>请立即复制并保存。关闭后无法再次查看此 Token。</p>
+      <label class="visually-hidden" for="token-secret">新 Token</label>
+      <textarea id="token-secret" readonly rows="3" spellcheck="false" autocomplete="off"></textarea>
+      <button id="token-copy" type="button">复制 Token</button>
+    </div>
+    <p id="token-dialog-status" role="status" aria-live="polite"></p>
   </dialog>
 </body>
 </html>

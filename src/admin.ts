@@ -9,6 +9,29 @@ import { buildKeyInstallCommand, keyTarget } from "./key-install.js";
 
 const tokenPattern = /^[a-f0-9]{64}$/u;
 const assets = new URL("../admin/", import.meta.url);
+const terminalAdminRoutes = {
+  connections: {
+    methods: ["GET", "POST"],
+    records: /^\/[a-f0-9]{32}$/u,
+    recordMethods: ["PATCH", "DELETE"],
+    actions: /^\/[a-f0-9]{32}\/test$/u,
+    query: ["owner", "page"],
+  },
+  agents: {
+    methods: ["GET", "POST"],
+    records: /^\/[A-Za-z][A-Za-z0-9_-]{0,63}$/u,
+    recordMethods: ["GET", "PATCH"],
+    actions: null,
+    query: ["page", "limit", "search", "catalog"],
+  },
+  tokens: {
+    methods: ["GET", "POST"],
+    records: /^\/[a-f0-9]{32}$/u,
+    recordMethods: ["GET", "DELETE"],
+    actions: /^\/[a-f0-9]{32}\/(?:rotate|revoke)$/u,
+    query: ["owner", "status", "page", "limit"],
+  },
+};
 
 async function readToken(file: string): Promise<string> {
   const entry = await stat(file);
@@ -47,9 +70,11 @@ export function createAdminApp(config: Config) {
   app.get("/admin.css", (_req, res) => res.sendFile(fileURLToPath(new URL("admin.css", assets))));
   app.get("/admin.js", (_req, res) => res.sendFile(fileURLToPath(new URL("admin.js", assets))));
   app.get("/connections.js", (_req, res) => res.sendFile(fileURLToPath(new URL("connections.js", assets))));
+  app.get("/identity.js", (_req, res) => res.sendFile(fileURLToPath(new URL("identity.js", assets))));
 
   app.use("/api", async (req, res, next) => {
-    const supplied = req.header("authorization")?.match(/^Bearer ([a-f0-9]{64})$/u)?.[1];
+    const headers = req.headersDistinct.authorization;
+    const supplied = headers?.length === 1 ? headers[0]?.match(/^Bearer ([a-f0-9]{64})$/u)?.[1] : undefined;
     if (supplied) {
       const expected = await readToken(admin.tokenFile);
       if (timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(supplied, "hex"))) {
@@ -80,38 +105,47 @@ export function createAdminApp(config: Config) {
     res.status(201).json(await importKey(keys, input.data));
   });
   const smallJson = express.json({ limit: "4kb", inflate: false });
-  app.use("/api/connections", smallJson, async (req, res) => {
-    if (!admin.terminalAdminPort) {
-      res.status(503).json({ error: "尚未配置终端服务的管理接口。" });
-      return;
-    }
-    const endpoint = req.path === "/" ? "" : req.path;
-    const allowed = endpoint === ""
-      ? ["GET", "POST"].includes(req.method)
-      : /^\/[a-f0-9]{32}$/u.test(endpoint)
-        ? ["PATCH", "DELETE"].includes(req.method)
-        : /^\/[a-f0-9]{32}\/test$/u.test(endpoint) && req.method === "POST";
-    if (!allowed) {
-      res.status(404).json({ error: "未知的连接管理请求。" });
-      return;
-    }
-    const url = new URL(`http://127.0.0.1:${admin.terminalAdminPort}/admin/connections${endpoint}`);
-    for (const field of ["owner", "page"]) {
-      if (typeof req.query[field] === "string") url.searchParams.set(field, req.query[field]);
-    }
-    try {
-      const response = await fetch(url, {
-        method: req.method,
-        headers: { Authorization: req.header("authorization")!, "Content-Type": "application/json" },
-        ...(req.body === undefined ? {} : { body: JSON.stringify(req.body) }),
-        redirect: "error",
-        signal: AbortSignal.timeout(75000),
-      });
-      res.status(response.status).json(await response.json());
-    } catch {
-      res.status(502).json({ error: "终端服务管理接口暂不可用。" });
-    }
-  });
+  for (const [resource, rules] of Object.entries(terminalAdminRoutes)) {
+    app.use(`/api/${resource}`, express.json({ limit: "40kb", inflate: false }), async (req, res) => {
+      if (!admin.terminalAdminPort) {
+        res.status(503).json({ error: "尚未配置终端服务的管理接口。" });
+        return;
+      }
+      const endpoint = req.path === "/" ? "" : req.path;
+      const allowed = endpoint === ""
+        ? rules.methods.includes(req.method)
+        : rules.records.test(endpoint)
+          ? rules.recordMethods.includes(req.method)
+          : rules.actions?.test(endpoint) && req.method === "POST";
+      if (!allowed) {
+        res.status(404).json({ error: "未知的连接管理请求。" });
+        return;
+      }
+      const url = new URL(`http://127.0.0.1:${admin.terminalAdminPort}/admin/${resource}${endpoint}`);
+      for (const field of rules.query) {
+        if (typeof req.query[field] === "string") url.searchParams.set(field, req.query[field]);
+      }
+      try {
+        const requestId = resource === "tokens" ? req.header("idempotency-key") : undefined;
+        const response = await fetch(url, {
+          method: req.method,
+          headers: {
+            Authorization: req.header("authorization")!,
+            "Content-Type": "application/json",
+            ...(requestId ? { "Idempotency-Key": requestId } : {}),
+          },
+          ...(req.body === undefined ? {} : { body: JSON.stringify(req.body) }),
+          redirect: "error",
+          signal: AbortSignal.timeout(75000),
+        });
+        const retryAfter = response.headers.get("retry-after");
+        if (retryAfter) res.setHeader("Retry-After", retryAfter);
+        res.status(response.status).json(await response.json());
+      } catch {
+        res.status(502).json({ error: "终端服务管理接口暂不可用。" });
+      }
+    });
+  }
   app.post("/api/keys/generate", smallJson, async (req, res) => {
     const input = keyGenerationInput.safeParse(req.body);
     if (!input.success) throw new KeyError(400, "Invalid key ID, label or algorithm.");

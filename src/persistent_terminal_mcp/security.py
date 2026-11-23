@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import logging
 import os
 import stat
@@ -14,7 +12,6 @@ from .config import Credential, Identifier, Principal, Settings
 from .errors import ToolError
 from .models import ProfileInput
 
-principals_schema = TypeAdapter(list[Principal])
 credentials_schema = TypeAdapter(dict[Identifier, Credential])
 credential_id = TypeAdapter(Identifier)
 MANAGED_PREFIX = "managed_"
@@ -40,23 +37,6 @@ class Security:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def authenticate(self, token: str) -> Principal | None:
-        if len(token) < 32 or len(token) > 256:
-            return None
-        try:
-            principals = self.principals()
-        except (ValueError, OSError):
-            return None
-        digest = hashlib.sha256(token.encode()).hexdigest()
-        matches = [principal for principal in principals if hmac.compare_digest(digest, principal.token_sha256)]
-        return matches[0] if len(matches) == 1 else None
-
-    def principals(self) -> list[Principal]:
-        try:
-            return principals_schema.validate_json(private_file(self.settings.principals_file))
-        except FileNotFoundError:
-            return []
-
     def credential_catalog(self) -> dict[str, Credential]:
         try:
             return credentials_schema.validate_json(private_file(self.settings.credentials_file))
@@ -75,6 +55,16 @@ class Security:
         if key.is_file():
             return Credential(kind="key", file=key)
         return None
+
+    def visible_credentials(self) -> dict[str, str]:
+        result = {ref: item.kind for ref, item in self.credential_catalog().items()}
+        directory = self.settings.managed_keys_dir
+        if directory and directory.is_dir():
+            for item in directory.iterdir():
+                ref = MANAGED_PREFIX + item.name
+                if self.managed_key(ref):
+                    result.setdefault(ref, "key")
+        return result
 
     def credential(self, principal: Principal, profile: ProfileInput) -> Credential | None:
         if profile.host not in principal.targets:
@@ -126,10 +116,10 @@ class Security:
 
         if operation is not None:
             argv = principal.commands.get(operation)
-            if not argv or command is not None or (cwd is not None and not principal.shell):
+            if not argv or command is not None or (cwd is not None and not principal.custom_commands):
                 raise ToolError("COMMAND_FORBIDDEN", "Use a configured operation without a custom command or directory.")
             return join(argv)
-        if not principal.shell:
+        if not principal.custom_commands:
             raise ToolError("COMMAND_FORBIDDEN", "This principal may execute configured operations only.")
         if not command or not command.strip() or "\0" in command:
             raise ToolError("INVALID_COMMAND", "Supply a nonempty shell command.")

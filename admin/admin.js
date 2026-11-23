@@ -37,6 +37,7 @@ function lock() {
   login.hidden = false;
   workspace.hidden = true;
   resetConnectionSection();
+  resetIdentitySections();
   logout.hidden = true;
   tokenField.focus();
 }
@@ -64,7 +65,7 @@ async function action(button, callback, region = status) {
   try {
     await callback();
   } catch (error) {
-    message(error.message, true, installDialog.open ? region : status);
+    message(error.message, true, region.closest("dialog")?.open ? region : status);
   } finally {
     button.disabled = false;
   }

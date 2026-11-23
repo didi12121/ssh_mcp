@@ -12,6 +12,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from conftest import LIMITED, OTHER, TOKEN, call, profile, put_secret
+from test_identities import admin_app, admin_request, create_agent, issue_token, mcp_status
 from persistent_terminal_mcp.server import build_app
 from persistent_terminal_mcp.backends import Remote
 from persistent_terminal_mcp.errors import ToolError
@@ -197,9 +198,9 @@ def test_pty_fallback_deadlines_and_output_limits(config, sshd):
         assert not any("�" in entry["text"] for entry in page["entries"])
         assert call(client, "terminal_close", session_id=session, preserve_remote=True)["status"] == "CLOSED"
         assert call(client, "terminal_status", session_id=session, reconnect=True)["code"] == "TERMINAL_CLOSED"
-        principals = json.loads(config.principals_file.read_text())
-        principals[0]["shell"] = False
-        config.principals_file.write_text(json.dumps(principals))
+        with sqlite3.connect(config.data_dir / "terminal.db") as db:
+            db.execute("UPDATE agent_identities SET permissions_json=json_set(permissions_json, '$.shell', json('false')) "
+                       "WHERE owner_id='first'")
         assert call(client, "terminal_read", session_id=session)["code"] == "SHELL_FORBIDDEN"
 
 
@@ -415,3 +416,46 @@ def test_approval_and_close_do_not_affect_other_sessions(config, sshd):
         }
         assert until(lambda: finished(client, two, second["execution_id"]))["exit_code"] == 0
         assert output(client, two, second["execution_id"]).strip() == "alive"
+
+
+def test_managed_tokens_preserve_live_terminal_and_apply_permission_changes(config, sshd):
+    _, port = sshd
+    with admin_app(config) as client:
+        create_agent(client, targets=["127.0.0.1"], credentials=["fixture"], workspaces=["ops"],
+                     shell=True, custom_commands=True, commands={"uptime": ["uptime"]})
+        first, second = issue_token(client), issue_token(client, name="Other client")
+        first_secret, second_secret = first["token"], second["token"]
+        p = profile(client, first_secret, port=port)["profile_id"]
+        created = call(client, "terminal_create", first_secret, profile_id=p, workspace_id="ops")
+        session = created["session_id"]
+        assert call(client, "terminal_send", first_secret, session_id=session, input="export OWNER_SCOPE=retained\n")["input_bytes"]
+        denied = call(client, "terminal_status", OTHER, session_id=session)
+        assert denied["code"] == "SESSION_NOT_FOUND"
+        job = call(client, "terminal_exec", first_secret, session_id=session, execution_mode="detached",
+                   command="printf begin; sleep 2; printf end; exit 6", yield_time_ms=25)
+        assert not job["is_error"], job
+        execution = job["execution_id"]
+        assert call(client, "terminal_read", OTHER, session_id=session, execution_id=execution)["code"] == "SESSION_NOT_FOUND"
+        assert admin_request(client, "PATCH", "agents/automation", {"enabled": False}).status_code == 200
+        assert mcp_status(client, first_secret) == mcp_status(client, second_secret) == 401
+        assert admin_request(client, "PATCH", "agents/automation", {"enabled": True}).status_code == 200
+        new = admin_request(client, "POST", f"tokens/{first['token_id']}/rotate").json()["token"]
+        assert mcp_status(client, first_secret) == 401 and mcp_status(client, new) == 200
+        assert call(client, "connection_get", new, profile_id=p)["owner_id"] == "automation"
+        assert call(client, "terminal_list", second_secret)["terminals"][0]["session_id"] == session
+        echo = call(client, "terminal_send", new, session_id=session,
+                    input="printf 'confirmation:%s\\n' \"$OWNER_SCOPE\"\n")
+        assert not echo["is_error"], echo
+        until(lambda: "confirmation:retained" in output(client, session, token=new))
+        assert until(lambda: finished(client, session, execution, new))["exit_code"] == 6
+        assert output(client, session, execution, new) == "beginend"
+        assert admin_request(client, "PATCH", "agents/automation", {"shell": False, "custom_commands": False}).status_code == 200
+        assert call(client, "terminal_send", new, session_id=session, input="pwd\n")["code"] == "SHELL_FORBIDDEN"
+        assert call(client, "terminal_exec", new, session_id=session, command="pwd")["code"] == "COMMAND_FORBIDDEN"
+        assert call(client, "terminal_exec", new, session_id=session, operation="uptime")["exit_code"] == 0
+        assert admin_request(client, "PATCH", "agents/automation", {"credentials": []}).status_code == 200
+        assert call(client, "terminal_exec", new, session_id=session, operation="uptime")["code"] == "CREDENTIAL_FORBIDDEN"
+        assert admin_request(client, "PATCH", "agents/automation", {"credentials": ["fixture"], "targets": []}).status_code == 200
+        assert call(client, "terminal_create", new, profile_id=p, workspace_id="ops")["code"] == "TARGET_FORBIDDEN"
+        assert admin_request(client, "PATCH", "agents/automation", {"targets": ["127.0.0.1"], "workspaces": []}).status_code == 200
+        assert call(client, "terminal_status", new, session_id=session)["code"] == "WORKSPACE_FORBIDDEN"

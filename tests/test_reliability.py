@@ -11,7 +11,7 @@ from conftest import OTHER, TOKEN
 from persistent_terminal_mcp.executions import Executions
 from persistent_terminal_mcp.models import Execution, Session
 from persistent_terminal_mcp.ring import OutputRing
-from persistent_terminal_mcp.security import Security, private_file
+from persistent_terminal_mcp.security import private_file
 from persistent_terminal_mcp.server import build_app
 from persistent_terminal_mcp.storage import Store
 
@@ -75,9 +75,9 @@ def test_secret_file_checks_open_file_permissions(config):
     shadow.symlink_to(identity)
     with pytest.raises(OSError):
         private_file(shadow)
-    assert Security(config).authenticate(TOKEN) is not None
     config.principals_file.chmod(0o644)
-    assert Security(config).authenticate(TOKEN) is None
+    with pytest.raises(PermissionError):
+        private_file(config.principals_file)
 
 
 def test_duplicate_headers_host_and_origin_are_rejected(config):

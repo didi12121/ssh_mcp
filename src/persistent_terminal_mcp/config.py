@@ -12,14 +12,24 @@ Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 class Principal(BaseModel):
     owner_id: Identifier
+    targets: list[str] = Field(default_factory=list)  # Exact hostnames/IP addresses.
+    credentials: set[CredentialRef] = Field(default_factory=set)
+    workspaces: set[Identifier] = Field(default_factory=lambda: {"default"})
+    shell: bool = False
+    custom_commands: bool = False
+    commands: dict[Identifier, list[str]] = Field(default_factory=dict)
+    ssh_agent: bool = False
+
+
+class LegacyPrincipal(BaseModel):
+    owner_id: Identifier
     token_sha256: Digest
-    targets: list[str] = Field(min_length=1)  # Exact hostnames/IP addresses.
+    targets: list[str] = Field(min_length=1)
     credentials: set[CredentialRef] = Field(default_factory=set)
     workspaces: set[Identifier] = Field(default_factory=lambda: {"default"})
     shell: bool = False
     commands: dict[Identifier, list[str]] = Field(default_factory=dict)
     ssh_agent: bool = False
-
 
 class Credential(BaseModel):
     kind: Literal["key", "password", "encrypted_key"]
@@ -41,6 +51,9 @@ class Settings(BaseSettings):
     web_admin_token_file: Path | None = None
     managed_keys_dir: Path | None = None
     ssh_agent_path: str | None = None
+    token_default_days: int = Field(default=90, ge=1, le=3650)
+    token_usage_interval_seconds: int = Field(default=60, ge=1, le=3600)
+    admin_token_mutations_per_minute: int = Field(default=30, ge=1, le=600)
     connect_timeout: float = Field(default=15, gt=0, le=60)
     keepalive_interval: int = Field(default=30, ge=1)
     idle_timeout: int = Field(default=3600, ge=1)

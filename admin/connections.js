@@ -23,18 +23,29 @@ function resetConnectionSection() {
 }
 
 function openManagementSection(section) {
-  const showConnections = section === "connections";
-  connectionSection.hidden = !showConnections;
-  workspace.hidden = showConnections;
-  navKeys.setAttribute("aria-pressed", String(!showConnections));
-  navConnections.setAttribute("aria-pressed", String(showConnections));
+  for (const [id, panel, button] of [
+    ["keys", workspace, navKeys], ["connections", connectionSection, navConnections],
+    ["agents", document.querySelector("#agents"), document.querySelector("#nav-agents")],
+    ["tokens", document.querySelector("#tokens"), document.querySelector("#nav-tokens")],
+  ]) {
+    panel.hidden = section !== id;
+    button.setAttribute("aria-pressed", String(section === id));
+  }
   message("");
-  if (showConnections) void action(connectionRefresh, loadConnections);
+  if (section === "connections") void action(connectionRefresh, loadConnections);
+  if (section === "agents" || section === "tokens") loadIdentitySection(section);
 }
 
 function connectionRequest(path = "", options, page = connectionPage) {
   const query = new URLSearchParams({ owner: connectionOwner.value, page: String(page) });
   return request(`${path}?${query}`, options, "connections");
+}
+
+function showAgentConnections(ownerId) {
+  connectionOwner.replaceChildren(new Option(ownerId, ownerId));
+  connectionPage = 1;
+  resetConnectionForm();
+  openManagementSection("connections");
 }
 
 function resetConnectionForm() {

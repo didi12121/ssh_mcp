@@ -15,6 +15,13 @@ case "${1:-}" in
     if [[ ! -e .env ]]; then
       cp .env.example .env
     fi
+    mkdir -p .data
+    exec 9>.data/terminal-upgrade.lock
+    flock -n 9
+    if systemctl --user is-active --quiet "$unit"; then
+      PYTHONPATH="$project/src" .venv/bin/python -m persistent_terminal_mcp.main preflight
+      systemctl --user stop "$unit"
+    fi
     uv sync --locked --no-dev --no-editable --reinstall-package persistent-terminal-mcp
     .venv/bin/terminal-mcp migrate
     if [[ "$1" == install ]]; then
@@ -40,7 +47,7 @@ EOF
       systemctl --user daemon-reload
       systemctl --user enable "$unit"
     fi
-    systemctl --user restart "$unit"
+    systemctl --user start "$unit"
     ;;
   start|stop|restart|status)
     systemctl --user "$1" "$unit"

@@ -17,6 +17,8 @@ services:
       PTMCP_PRINCIPALS_FILE: /run/ptmcp/principals.json
       PTMCP_CREDENTIALS_FILE: /run/ptmcp/credentials.json
       PTMCP_MASTER_KEY_FILE: /run/ptmcp/master.key
+      PTMCP_WEB_ADMIN_TOKEN_FILE: /run/ptmcp/admin-token
+      PTMCP_MANAGED_KEYS_DIR: /run/ptmcp/managed-keys
     volumes:
       - terminal_data:/data
       - ./terminal-secrets:/run/ptmcp:ro
