@@ -46,7 +46,8 @@ class RequireBearer:
             await self.app(scope, receive, send)
             return
         request = Request(scope)
-        value = request.headers.get("authorization", "")
+        values = request.headers.getlist("authorization")
+        value = values[0] if len(values) == 1 else ""
         agent = await asyncio.to_thread(self.security.authenticate, value[7:]) if value.startswith("Bearer ") else None
         if agent is None:
             response = JSONResponse({"error": "UNAUTHENTICATED"}, 401, {"WWW-Authenticate": "Bearer"})
@@ -243,7 +244,10 @@ def build_app(settings: Settings, approve: Approval | None = None) -> ASGIApp:
         if execution_id and signal in {"SIGINT", "SIGTERM", "SIGKILL"}:
             return await executions.signal(agent, row, await store.execution(row.session_id, execution_id), signal)
         if not execution_id and signal in {"CTRL_C", "CTRL_D"}:
-            return await sessions.send(agent, row, "\x03" if signal == "CTRL_C" else "\x04")
+            security.shell(agent)
+            payload = "\x03" if signal == "CTRL_C" else "\x04"
+            await gate(agent, row.session_id, payload)
+            return await sessions.send(agent, row, payload)
         raise ToolError("INVALID_SIGNAL", "PTY control keys and execution signals require different target types.")
 
     @tool("Disconnect locally while preserving tmux, or explicitly destroy this project's remote terminal.")

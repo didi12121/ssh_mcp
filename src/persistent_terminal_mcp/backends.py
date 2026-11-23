@@ -55,15 +55,34 @@ class Remote:
         return result.exit_status == 0
 
     async def exists(self, ssh: asyncssh.SSHClientConnection, name: str) -> bool:
-        return (await self.call(ssh, self.tmux("has-session", "-t", "=" + name))).exit_status == 0
+        result = await self.call(ssh, self.tmux("has-session", "-t", "=" + name))
+        if result.exit_status not in {0, 1}:
+            raise ToolError("TMUX_UNAVAILABLE", "The remote tmux session state could not be checked.")
+        return result.exit_status == 0
 
-    async def create_tmux(self, ssh: asyncssh.SSHClientConnection, name: str) -> None:
-        command = self.tmux("new-session", "-d", "-s", name, "-x", "120", "-y", "32")
-        pipe = self.tmux("pipe-pane", "-o", "-t", name + ":0.0", self.helper("pipe", name))
-        result = await self.call(ssh, command + " && " + pipe)
-        if result.exit_status != 0:
-            await self.kill_tmux(ssh, name)
-            raise ToolError("TERMINAL_START_FAILED", "Remote tmux terminal could not be initialized.")
+    async def prepare_tmux(self, ssh: asyncssh.SSHClientConnection, name: str, *, pending: bool) -> None:
+        if not await self.exists(ssh, name):
+            if not pending:
+                raise ToolError("TMUX_SESSION_LOST", "The original remote tmux session no longer exists.")
+            command = self.tmux("new-session", "-d", "-s", name, "-x", "120", "-y", "32")
+            result = await self.call(ssh, command)
+            if result.exit_status != 0 and not await self.exists(ssh, name):
+                raise ToolError("TERMINAL_START_FAILED", "Remote tmux terminal could not be initialized.")
+        pane = name + ":0.0"
+        if pending:
+            # An interrupted initialization may have created the pane without its output pipe.
+            pipe = self.tmux("pipe-pane", "-o", "-t", pane, self.helper("pipe", name))
+            result = await self.call(ssh, pipe)
+            if result.exit_status != 0:
+                raise ToolError("TERMINAL_START_FAILED", "Remote terminal output pipe could not be initialized.")
+        result = await self.call(ssh, self.tmux("display-message", "-p", "-t", pane, "#{pane_dead}:#{pane_pipe}"))
+        if result.exit_status != 0 or result.stdout.strip() not in {"0:0", "0:1"}:
+            raise ToolError("TMUX_SESSION_LOST", "The original tmux shell pane is no longer available.")
+        if result.stdout.strip() == "0:0":
+            # Reinstall a lost logger without replacing the original live shell.
+            pipe = await self.call(ssh, self.tmux("pipe-pane", "-o", "-t", pane, self.helper("pipe", name)))
+            if pipe.exit_status != 0:
+                raise ToolError("TERMINAL_OUTPUT_UNAVAILABLE", "Remote terminal output pipe is unavailable.")
 
     async def attach(self, ssh: asyncssh.SSHClientConnection, name: str | None) -> asyncssh.SSHClientProcess[bytes]:
         try:

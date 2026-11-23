@@ -15,7 +15,7 @@ case "${1:-}" in
     if [[ ! -e .env ]]; then
       cp .env.example .env
     fi
-    uv sync --locked --no-dev --no-editable
+    uv sync --locked --no-dev --no-editable --reinstall-package persistent-terminal-mcp
     .venv/bin/terminal-mcp migrate
     if [[ "$1" == install ]]; then
       mkdir -p "$unit_dir"

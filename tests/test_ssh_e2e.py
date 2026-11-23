@@ -1,14 +1,21 @@
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
+import sqlite3
 import subprocess
+import sys
 import time
 
 import asyncssh
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
 from conftest import LIMITED, OTHER, TOKEN, call, profile, put_secret
 from persistent_terminal_mcp.server import build_app
+from persistent_terminal_mcp.backends import Remote
+from persistent_terminal_mcp.errors import ToolError
+from persistent_terminal_mcp.ssh import SSHConnectionManager
 
 
 def docker(*args: str) -> str:
@@ -98,7 +105,9 @@ def test_real_tmux_channels_restart_and_detached(config, sshd):
         handed_off = call(client, "terminal_exec", session_id=session,
                           command="printf start; sleep 4; printf end; exit 9", execution_mode="detached",
                           yield_time_ms=100)
-        assert handed_off["status"] == "RUNNING", handed_off
+        assert handed_off["status"] in {"PENDING", "RUNNING"}, handed_off
+        until(lambda: call(client, "terminal_status", session_id=session,
+                           execution_id=handed_off["execution_id"])["status"] == "RUNNING")
         unconfirmed = call(client, "terminal_exec", session_id=session,
                            command="echo once >> /tmp/foreground-count; sleep 9", yield_time_ms=120)
         assert unconfirmed["status"] == "RUNNING"
@@ -188,3 +197,203 @@ def test_pty_fallback_deadlines_and_output_limits(config, sshd):
         assert not any("�" in entry["text"] for entry in page["entries"])
         assert call(client, "terminal_close", session_id=session, preserve_remote=True)["status"] == "CLOSED"
         assert call(client, "terminal_status", session_id=session, reconnect=True)["code"] == "TERMINAL_CLOSED"
+        principals = json.loads(config.principals_file.read_text())
+        principals[0]["shell"] = False
+        config.principals_file.write_text(json.dumps(principals))
+        assert call(client, "terminal_read", session_id=session)["code"] == "SHELL_FORBIDDEN"
+
+
+@pytest.mark.parametrize("remote_exists", [False, True])
+def test_restart_recovers_only_unfinished_tmux_initialization(config, sshd, remote_exists):
+    container, port = sshd
+    address = config.data_dir / "crash-test-port"
+    settings = config.data_dir / "crash-test-settings.json"
+    settings.write_text(config.model_dump_json())
+    crash_service = """
+import os
+from pathlib import Path
+import socket
+import sys
+import uvicorn
+from persistent_terminal_mcp.backends import Remote
+from persistent_terminal_mcp.config import Settings
+from persistent_terminal_mcp.server import build_app
+
+async def crash(self, ssh, name, *, pending):
+    assert pending
+    if sys.argv[3] == "True":
+        assert (await self.call(ssh, self.tmux("new-session", "-d", "-s", name))).exit_status == 0
+    os._exit(77)
+
+Remote.prepare_tmux = crash
+settings = Settings.model_validate_json(Path(sys.argv[1]).read_text())
+with socket.socket() as listener:
+    listener.bind(("127.0.0.1", 0))
+    Path(sys.argv[2]).write_text(str(listener.getsockname()[1]))
+    uvicorn.Server(uvicorn.Config(build_app(settings), log_level="warning")).run(sockets=[listener])
+"""
+    with subprocess.Popen([sys.executable, "-c", crash_service, str(settings),
+                           str(address), str(remote_exists)]) as process:
+        try:
+            listen_port = until(lambda: address.read_text() if address.exists() else "")
+            with httpx.Client(base_url=f"http://127.0.0.1:{listen_port}", timeout=5) as client:
+                def healthy():
+                    try:
+                        return client.get("/health").is_success
+                    except httpx.TransportError:
+                        return False
+
+                until(healthy)
+                profile_id = profile(client, port=port)["profile_id"]
+                with pytest.raises(httpx.TransportError):
+                    call(client, "terminal_create", profile_id=profile_id)
+            assert process.wait(timeout=5) == 77
+        finally:
+            if process.poll() is None:
+                process.kill()
+    with sqlite3.connect(config.data_dir / "terminal.db") as db:
+        session_id, backend, status = db.execute("SELECT session_id, backend, status FROM sessions").fetchone()
+    assert (backend, status) == ("tmux_pending", "CREATING")
+    if remote_exists:
+        docker("exec", "-u", "fixture", container, "tmux", "-L", "persistent-terminal-mcp",
+               "send-keys", "-t", "t_" + session_id, "export BEFORE_CRASH=preserved", "Enter")
+    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+        result = call(client, "terminal_create", profile_id=profile_id)
+        assert result["status"] == "READY" and result["session_id"] == session_id and result["reused"]
+        call(client, "terminal_send", session_id=session_id,
+             input="printf 'restored:%s\\n' \"$BEFORE_CRASH\"\n")
+        expected = "restored:preserved" if remote_exists else "restored:\r\n"
+        until(lambda: expected in output(client, session_id))
+        docker("exec", "-u", "fixture", container, "tmux", "-L", "persistent-terminal-mcp",
+               "kill-session", "-t", "t_" + session_id)
+        until(lambda: not call(client, "terminal_status", session_id=session_id)["interactive_shell_alive"])
+        assert call(client, "terminal_status", session_id=session_id, reconnect=True)["code"] == "TMUX_SESSION_LOST"
+        assert call(client, "terminal_create", profile_id=profile_id)["code"] == "TMUX_SESSION_LOST"
+        assert not call(client, "terminal_status", session_id=session_id)["recoverable"]
+    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+        assert not call(client, "terminal_status", session_id=session_id)["recoverable"]
+        assert call(client, "terminal_close", session_id=session_id, preserve_remote=False)["status"] == "CLOSED"
+
+
+def test_transport_abort_is_detected_and_parallel_recovery_is_single(config, sshd, monkeypatch):
+    _, port = sshd
+    connections = []
+    original = SSHConnectionManager.connect
+
+    async def capture(self, principal, data):
+        ssh = await original(self, principal, data)
+        connections.append(ssh.connection)
+        return ssh
+
+    monkeypatch.setattr(SSHConnectionManager, "connect", capture)
+    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+        profile_id = profile(client, port=port)["profile_id"]
+        row = call(client, "terminal_create", profile_id=profile_id)
+        session_id = row["session_id"]
+        work = call(client, "terminal_exec", session_id=session_id, command="sleep 20", yield_time_ms=100)
+        assert work["status"] == "RUNNING"
+        assert client.portal is not None
+        client.portal.call(connections[0].abort)
+        until(lambda: call(client, "terminal_status", session_id=session_id)["status"] == "DISCONNECTED")
+        assert not call(client, "terminal_status", session_id=session_id)["ssh_connected"]
+        assert until(lambda: finished(client, session_id, work["execution_id"]))["status"] == "UNKNOWN"
+        assert len(connections) == 1
+        with ThreadPoolExecutor(5) as pool:
+            states = list(pool.map(lambda _: call(client, "terminal_activate", session_id=session_id), range(5)))
+        assert all(state.get("active") for state in states)
+        assert len(connections) == 2
+
+
+def wait_for_worker(client, session, item):
+    execution = item["execution_id"]
+    until(lambda: call(client, "terminal_status", session_id=session, execution_id=execution)["status"] == "RUNNING")
+    return execution
+
+
+@pytest.mark.parametrize("fault", ["worker_kill", "tmux_lost", "write_failure", "process_kill"])
+def test_detached_faults_never_claim_success(config, sshd, fault):
+    container, port = sshd
+    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+        session = call(client, "terminal_create", profile_id=profile(client, port=port)["profile_id"])["session_id"]
+        created = call(client, "terminal_exec", session_id=session, execution_mode="detached",
+                       command="echo once >> /tmp/fault-count; exec sleep 9", yield_time_ms=10)
+        execution = wait_for_worker(client, session, created)
+        folder = "/home/fixture/.local/state/persistent-terminal-mcp/e_" + execution
+        state = json.loads(docker("exec", container, "cat", folder + "/state.json"))
+        until(lambda: docker("exec", container, "sh", "-c", "test -s /tmp/fault-count && echo started || true"))
+        if fault in {"worker_kill", "process_kill"}:
+            pid = str(state["worker_pid" if fault == "worker_kill" else "process_pid"])
+            docker("exec", "-u", "fixture", container, "kill", "-KILL", pid)
+        elif fault == "tmux_lost":
+            docker("exec", "-u", "fixture", container, "tmux", "-L", "persistent-terminal-mcp",
+                   "kill-session", "-t", "e_" + execution)
+        else:
+            docker("exec", "-u", "fixture", container, "mkdir", folder + "/state.tmp")
+            assert call(client, "terminal_signal", session_id=session, execution_id=execution,
+                        signal="SIGKILL")["signal_requested"] == "SIGKILL"
+        result = until(lambda: finished(client, session, execution))
+        assert result["status"] == ("FAILED" if fault == "process_kill" else "UNKNOWN"), result
+        assert result["exit_code"] is None
+        assert docker("exec", container, "cat", "/tmp/fault-count").splitlines() == ["once"]
+        assert call(client, "terminal_status", session_id=session)["interactive_shell_alive"]
+
+
+def test_detached_transport_loss_after_launch_does_not_replay(config, sshd, monkeypatch):
+    container, port = sshd
+    original = Remote.detach
+
+    async def interrupt(self, ssh, name, command, cwd):
+        await original(self, ssh, name, command, cwd)
+        ssh.abort()
+        raise ToolError("REMOTE_UNAVAILABLE", "Injected loss of the launch response.")
+
+    monkeypatch.setattr(Remote, "detach", interrupt)
+    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+        session = call(client, "terminal_create", profile_id=profile(client, port=port)["profile_id"])["session_id"]
+        submitted = call(client, "terminal_exec", session_id=session, execution_mode="detached",
+                         command="echo once >> /tmp/launch-count; sleep 1; exit 11")
+        assert submitted["status"] == "UNKNOWN" and submitted["exit_code"] is None
+        execution = submitted["execution_id"]
+
+        def recovered():
+            result = call(client, "terminal_status", session_id=session, execution_id=execution)
+            return result if result["status"] == "COMPLETED" else None
+
+        assert until(recovered)["exit_code"] == 11
+        assert docker("exec", container, "cat", "/tmp/launch-count").splitlines() == ["once"]
+
+
+def test_approval_and_close_do_not_affect_other_sessions(config, sshd):
+    _, port = sshd
+    observed = []
+
+    async def approve(principal, session_id, command):
+        observed.append((principal.owner_id, session_id, command))
+        return command not in {"denied", "denied\n", "\x03"}
+
+    config.idle_timeout = 1
+    with TestClient(build_app(config, approve=approve), base_url="http://127.0.0.1") as client:
+        profile_id = profile(client, port=port)["profile_id"]
+        one = call(client, "terminal_create", profile_id=profile_id, name="one")["session_id"]
+        two = call(client, "terminal_create", profile_id=profile_id, name="two")["session_id"]
+        limited = profile(client, LIMITED, port=port)["profile_id"]
+        restricted = call(client, "terminal_create", LIMITED, profile_id=limited)["session_id"]
+        assert call(client, "terminal_send", LIMITED, session_id=restricted, input="denied\n")["code"] == "SHELL_FORBIDDEN"
+        assert not observed
+        assert call(client, "terminal_exec", OTHER, session_id=one, command="denied")["code"] == "SESSION_NOT_FOUND"
+        assert not observed
+        assert call(client, "terminal_exec", session_id=one, command="denied")["code"] == "APPROVAL_REQUIRED"
+        assert call(client, "terminal_send", session_id=one, input="denied\n")["code"] == "APPROVAL_REQUIRED"
+        assert call(client, "terminal_signal", session_id=one, signal="CTRL_C")["code"] == "APPROVAL_REQUIRED"
+        first = call(client, "terminal_exec", session_id=one, command="sleep 8", yield_time_ms=100)
+        second = call(client, "terminal_exec", session_id=two, command="sleep 3; echo alive", yield_time_ms=100)
+        assert call(client, "terminal_signal", session_id=one, execution_id=second["execution_id"],
+                    signal="SIGKILL")["code"] == "EXECUTION_NOT_FOUND"
+        assert call(client, "terminal_close", session_id=one, preserve_remote=True)["status"] == "DISCONNECTED"
+        assert until(lambda: finished(client, one, first["execution_id"]))["status"] == "UNKNOWN"
+        until(lambda: not call(client, "terminal_status", LIMITED, session_id=restricted)["ssh_connected"])
+        assert call(client, "terminal_status", session_id=two, execution_id=second["execution_id"])["status"] in {
+            "RUNNING", "COMPLETED",
+        }
+        assert until(lambda: finished(client, two, second["execution_id"]))["exit_code"] == 0
+        assert output(client, two, second["execution_id"]).strip() == "alive"

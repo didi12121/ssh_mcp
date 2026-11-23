@@ -18,7 +18,11 @@ class SSHConnection:
     resources: AsyncExitStack
 
     async def close(self) -> None:
-        await self.resources.aclose()
+        try:
+            async with asyncio.timeout(3):
+                await self.resources.aclose()
+        except (asyncssh.Error, OSError, TimeoutError):
+            self.connection.abort()
 
 
 class SSHConnectionManager:

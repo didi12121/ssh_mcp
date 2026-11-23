@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import logging
 import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -19,10 +20,18 @@ audit_log = logging.getLogger("terminal.audit")
 
 
 def private_file(file: Path) -> bytes:
-    info = file.stat()
-    if not file.is_file() or (os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & 0o077)):
-        raise PermissionError("Secret file must be owned by the service user and inaccessible to other users")
-    return file.read_bytes()
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(file, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and (
+            info.st_uid != os.getuid() or info.st_mode & 0o077
+        )):
+            raise PermissionError("Secret file must be owned by the service user and inaccessible to other users")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(fd)
 
 
 class Security:
