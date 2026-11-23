@@ -1,0 +1,31 @@
+services:
+  terminal-mcp:
+    build:
+      context: .
+      args:
+        PYTHON_BASE_IMAGE: ${PTMCP_PYTHON_IMAGE:-python:3.12-slim}
+        PTMCP_UID: ${PTMCP_UID:-10001}
+        PTMCP_GID: ${PTMCP_GID:-10001}
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PTMCP_PORT:-8766}:8766"
+    environment:
+      PTMCP_HOST: 0.0.0.0
+      PTMCP_PORT: 8766
+      PTMCP_ALLOWED_HOSTS: '["127.0.0.1:*","localhost:*"]'
+      PTMCP_KNOWN_HOSTS: /run/ptmcp/known_hosts
+      PTMCP_PRINCIPALS_FILE: /run/ptmcp/principals.json
+      PTMCP_CREDENTIALS_FILE: /run/ptmcp/credentials.json
+      PTMCP_MASTER_KEY_FILE: /run/ptmcp/master.key
+    volumes:
+      - terminal_data:/data
+      - ./terminal-secrets:/run/ptmcp:ro
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8766/health', timeout=2)"]
+      interval: 15s
+      timeout: 4s
+      retries: 3
+
+volumes:
+  terminal_data:

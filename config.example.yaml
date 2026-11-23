@@ -1,0 +1,72 @@
+version: 1
+
+ssh:
+  executable: ssh
+  sshAddExecutable: ssh-add
+  knownHostsFile: C:\Users\YOUR_NAME\.ssh\known_hosts
+  connectTimeoutSeconds: 10
+  commandTimeoutSeconds: 30
+  maxOutputBytes: 65536
+
+audit:
+  file: .data/audit.jsonl
+
+# Optional SSH key store and loopback-only HTTP administration.
+# keys:
+#   directory: .data/keys
+#   sshKeygenExecutable: ssh-keygen
+# admin:
+#   port: 8788
+#   tokenFile: .data/admin-token
+
+# Required only for the intranet Streamable HTTP server.
+http:
+  host: 0.0.0.0
+  port: 8787
+  # Replace 192.168.1.50 with this computer's fixed LAN IP or internal DNS name.
+  allowedHosts: [192.168.1.50, localhost]
+  tokenStoreFile: .data/tokens.json
+  maxRequestsPerMinute: 120
+  sessionIdleMinutes: 60
+  maxSessions: 100
+
+hosts:
+  production_web:
+    address: 203.0.113.10
+    port: 22
+    user: observer
+    description: Production web server (read-only account)
+    tags: [production, web]
+    enabled: true
+    # Omit identityFile to use ssh-agent. If set, it must be a local absolute path.
+    # identityFile: C:\Users\YOUR_NAME\.ssh\id_ed25519_production
+    # Or reference an imported private key by ID (requires keys).
+    # identityKey: web_readonly
+    operations: [system_info, uptime, disk_usage, service_status]
+
+operations:
+  system_info:
+    description: Show the remote kernel and architecture
+    command: [uname, -a]
+    readOnly: true
+
+  uptime:
+    description: Show uptime and load averages
+    command: [uptime]
+    readOnly: true
+
+  disk_usage:
+    description: Show filesystem usage
+    command: [df, -h]
+    readOnly: true
+
+  service_status:
+    description: Show one systemd service status without paging
+    command: [systemctl, status, "{service}", --no-pager]
+    readOnly: true
+    parameters:
+      service:
+        description: A systemd unit, for example nginx.service
+        pattern: "[A-Za-z0-9_.@-]{1,64}"
+        required: true
+        maxLength: 64

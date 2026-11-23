@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>密钥管理 · SSH MCP</title>
+  <link rel="stylesheet" href="/admin.css">
+  <script src="/admin.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="shell brand"><span class="mark" aria-hidden="true">&gt;_</span> SSH MCP
+      <button id="logout" type="button" class="quiet" hidden>退出管理</button>
+    </div>
+  </header>
+  <main class="shell">
+    <h1>SSH 密钥管理</h1>
+    <form id="login" class="panel login">
+      <label for="token">管理员令牌</label>
+      <p class="muted">使用服务器上的管理令牌解锁密钥库。</p>
+      <input id="token" type="password" autocomplete="off" required>
+      <button type="submit">解锁</button>
+    </form>
+    <div id="workspace" class="workspace" hidden>
+      <section class="panel inventory" aria-labelledby="inventory-title">
+        <div class="section-title">
+          <h2 id="inventory-title">密钥库</h2>
+          <button id="refresh" type="button" class="quiet">刷新</button>
+        </div>
+        <p id="empty" class="empty">密钥库为空。生成或导入密钥后可在此查看。</p>
+        <ul id="keys" class="key-list"></ul>
+      </section>
+      <section class="panel" aria-label="添加密钥">
+        <div class="mode-switch" role="group" aria-label="添加方式">
+          <button type="button" id="show-generate" aria-controls="generate" aria-pressed="true">生成密钥</button>
+          <button type="button" id="show-import" aria-controls="import" aria-pressed="false">导入密钥</button>
+        </div>
+        <form id="generate">
+          <label for="generate-id">密钥 ID</label>
+          <input id="generate-id" name="id" required maxlength="64" pattern="[A-Za-z][A-Za-z0-9_\-]{0,63}" placeholder="例如 web_readonly" autocomplete="off">
+          <label for="generate-label">备注 <span class="muted">可选</span></label>
+          <input id="generate-label" name="label" maxlength="100" placeholder="例如 Web 只读账号">
+          <label for="algorithm">算法</label>
+          <select id="algorithm" name="algorithm">
+            <option value="ed25519">Ed25519（推荐）</option>
+            <option value="rsa-3072">RSA 3072</option>
+            <option value="rsa-4096">RSA 4096</option>
+            <option value="ecdsa-p256">ECDSA P-256</option>
+          </select>
+          <button type="submit">生成并保存</button>
+        </form>
+        <form id="import" hidden>
+        <label for="key-id">密钥 ID</label>
+        <input id="key-id" name="id" required minlength="1" maxlength="64" pattern="[A-Za-z][A-Za-z0-9_\-]{0,63}" placeholder="例如 web_readonly" autocomplete="off">
+        <label for="label">备注 <span class="muted">可选</span></label>
+        <input id="label" name="label" maxlength="100" placeholder="例如 Web 只读账号">
+        <label for="kind">密钥类型</label>
+        <select id="kind" name="kind">
+          <option value="public">SSH 公钥</option>
+          <option value="private">SSH 私钥（无口令）</option>
+        </select>
+        <label for="material">密钥内容</label>
+        <textarea id="material" name="material" required maxlength="32768" rows="5" spellcheck="false" autocomplete="off" placeholder="粘贴 OpenSSH 密钥"></textarea>
+        <label for="key-file" class="file-label">或选择密钥文件</label>
+        <input id="key-file" type="file">
+        <button type="submit">导入</button>
+        </form>
+      </section>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
+  </main>
+  <dialog id="install-dialog" class="panel" aria-labelledby="install-title">
+    <div class="section-title">
+      <h2 id="install-title">安装公钥</h2>
+      <button id="close-install" type="button" class="quiet">关闭</button>
+    </div>
+    <p id="install-key" class="muted"></p>
+    <form id="install-form">
+      <label for="install-target">已配置主机</label>
+      <select id="install-target"></select>
+      <label for="install-address">目标服务器</label>
+      <input id="install-address" name="address" required maxlength="253" placeholder="内网 IP 或主机名">
+      <div class="target-fields">
+        <div>
+          <label for="install-user">SSH 用户</label>
+          <input id="install-user" name="user" required maxlength="64" placeholder="例如 deploy">
+        </div>
+        <div>
+          <label for="install-port">端口</label>
+          <input id="install-port" name="port" type="number" required min="1" max="65535" value="22">
+        </div>
+      </div>
+      <button type="submit">生成安装命令</button>
+    </form>
+    <div id="install-result" hidden>
+      <p class="muted">复制到能登录目标账号的终端执行。命令会将公钥加入目标账号的 authorized_keys。</p>
+      <label for="install-command" class="visually-hidden">公钥安装命令</label>
+      <textarea id="install-command" readonly rows="5" spellcheck="false"></textarea>
+      <button id="copy-install" type="button">复制安装命令</button>
+    </div>
+    <p id="install-status" role="status" aria-live="polite"></p>
+  </dialog>
+</body>
+</html>
