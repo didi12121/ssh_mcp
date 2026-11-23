@@ -13,7 +13,7 @@ import uvicorn
 
 from .config import Settings
 from .identity_models import AccessToken, AgentIdentity
-from .migrations import schema_version
+from .migrations import SCHEMA_VERSION, schema_version
 from .models import Execution
 from .server import build_app
 from .storage import Store
@@ -40,7 +40,7 @@ async def migrate(settings: Settings) -> None:
         async with store.transaction() as db:
             agents = await db.scalar(select(func.count()).select_from(AgentIdentity))
             legacy = await db.scalar(select(func.count()).select_from(AccessToken).where(AccessToken.legacy))
-        print(json.dumps({"schema": 2, "agents": agents, "legacy_tokens": legacy}))
+        print(json.dumps({"schema": SCHEMA_VERSION, "agents": agents, "legacy_tokens": legacy}))
     finally:
         await store.engine.dispose()
 

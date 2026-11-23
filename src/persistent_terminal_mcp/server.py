@@ -19,12 +19,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .config import CredentialRef, Identifier, Port, Principal, Settings
+from .config import Identifier, Principal, Settings
 from .errors import ToolError
 from .executions import Executions
 from .identity_store import Identities
-from .models import ProfileInput, ProfilePatch
-from .profiles import Profiles, profile_info
+from .profiles import Profiles
 from .security import Security, audit
 from .sessions import Sessions
 from .ssh import SSHConnectionManager
@@ -32,6 +31,7 @@ from .storage import Store
 from .web_admin import ADMIN_ROUTES, WebAdmin
 from .web_connections import register_connection_routes
 from .web_identity import register_identity_routes
+from .web_keys import register_key_routes
 
 owner: ContextVar[Principal] = ContextVar("ptmcp_principal")
 ResourceId = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")]
@@ -138,40 +138,12 @@ def build_app(settings: Settings, approve: Approval | None = None) -> ASGIApp:
         if approve is not None and not await approve(agent, session_id, value):
             raise ToolError("APPROVAL_REQUIRED", "Operator policy denied this input.")
 
-    @tool("Save an SSH connection profile using a credential reference already granted to your identity.")
-    async def connection_create(
-        name: Name, host: Query, username: Annotated[str, StringConstraints(max_length=64)], port: Port = 22,
-        auth_type: Literal["key", "agent", "password"] = "key", credential_ref: CredentialRef | None = None,
-        description: Annotated[str, StringConstraints(max_length=500)] | None = None,
-        tags: Annotated[list[str], Field(max_length=32)] | None = None,
-    ) -> CallToolResult:
-        return await profiles.create(owner.get(), ProfileInput(
-            name=name, host=host, username=username, port=port, auth_type=auth_type,
-            credential_ref=credential_ref, description=description, tags=tags or [],
-        ))
-
-    @tool("Find your SSH connection profiles by name, host, or tag before connecting.")
+    @tool("List authorized SSH server aliases and opaque profile IDs.")
     async def connection_list(
-        name: Query = "", host: Query = "", tag: Query = "",
+        name: Query = "", tag: Query = "",
         page: Annotated[int, Field(ge=1)] = 1, limit: Annotated[int, Field(ge=1, le=100)] = 25,
     ) -> CallToolResult:
-        return await profiles.list(owner.get(), name, host, tag, page, limit)
-
-    @tool("Get connection profile metadata and its credential reference. Secret material is excluded.")
-    async def connection_get(profile_id: ResourceId) -> CallToolResult:
-        return profile_info(await store.profile(owner.get().owner_id, profile_id))
-
-    @tool("Save a new profile version. Existing terminals keep their original connection settings.")
-    async def connection_update(profile_id: ResourceId, changes: ProfilePatch) -> CallToolResult:
-        return await profiles.edit(owner.get(), profile_id, changes)
-
-    @tool("Delete an unused connection profile. Shared credentials are unaffected.")
-    async def connection_delete(profile_id: ResourceId) -> CallToolResult:
-        return await profiles.delete(owner.get(), profile_id)
-
-    @tool("Test DNS, SSH connectivity, host identity, authentication and tmux availability with a temporary connection.")
-    async def connection_test(profile_id: ResourceId) -> CallToolResult:
-        return await profiles.test(owner.get(), profile_id)
+        return await profiles.discover(owner.get(), name, tag, page, limit)
 
     @tool("Create or reuse a managed terminal for this profile, name and workspace. Activates that terminal.")
     async def terminal_create(profile_id: ResourceId, name: Name = "terminal", workspace_id: Identifier = "default") -> CallToolResult:
@@ -281,8 +253,9 @@ def build_app(settings: Settings, approve: Approval | None = None) -> ASGIApp:
             await connection.execute(text("SELECT 1"))
         return JSONResponse({"ok": True, "service": "persistent-terminal-mcp"})
 
-    register_connection_routes(mcp, profiles, security, admin)
-    register_identity_routes(mcp, admin, security)
+    register_connection_routes(mcp, profiles, sessions, security, admin)
+    register_identity_routes(mcp, admin)
+    register_key_routes(mcp, admin, security)
     app = mcp.streamable_http_app()
     sdk_lifespan = app.router.lifespan_context
 

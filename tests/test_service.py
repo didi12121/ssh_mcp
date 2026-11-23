@@ -8,11 +8,11 @@ from starlette.testclient import TestClient
 from persistent_terminal_mcp.models import ProfileInput
 from persistent_terminal_mcp.ring import OutputRing
 from persistent_terminal_mcp.server import build_app
-from conftest import OTHER, TOKEN, call, profile, put_secret
+from conftest import OTHER, TOKEN, ADMIN_HEADERS, admin_request, call, global_profile, profile, put_secret
 
 
 def test_health_and_authentication(config):
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         assert client.get("/health").json()["ok"]
         assert client.post("/mcp", json={}).status_code == 401
         assert client.post("/mcp", json={}, headers={"Authorization": "Bearer " + "x" * 40}).status_code == 401
@@ -23,38 +23,41 @@ def test_health_and_authentication(config):
             "Authorization": "Bearer " + TOKEN, "Accept": "application/json, text/event-stream",
         }, json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
         tools = response.json()["result"]["tools"]
-        assert len(tools) == 16
+        assert len(tools) == 11
         assert all(tool["description"] and tool["inputSchema"] for tool in tools)
+        assert not any({"host", "port", "username", "credential_ref"} & tool["inputSchema"].get("properties", {}).keys()
+                       for tool in tools)
 
 
-def test_profile_crud_isolation_and_persistence(config):
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+def test_global_profiles_are_admin_owned_and_client_sees_only_aliases(config):
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         first = profile(client, name="Sandbox One", tags=["demo", "demo"])
-        second = profile(client, name="Sandbox Two", host="localhost")
-        assert first["tags"] == ["demo"]
-        assert second["profile_id"] != first["profile_id"]
-        assert "PRIVATE KEY" not in str(first)
-        assert str(config.data_dir) not in str(first)
+        second = global_profile(client, name="Sandbox Two", host="localhost")
+        assert first["tags"] == ["demo"] and "owner_id" not in first
+        assert admin_request(client, "GET", "connections").json()["total"] == 2
         assert call(client, "connection_list", OTHER)["total"] == 0
-        assert call(client, "connection_get", OTHER, profile_id=first["profile_id"])["code"] == "PROFILE_NOT_FOUND"
-        search = call(client, "connection_list", name="BOX", host="127", tag="demo", limit=1)
-        assert [item["profile_id"] for item in search["profiles"]] == [first["profile_id"]]
-        assert call(client, "connection_list", limit=1, page=2)["profiles"][0]["profile_id"] == second["profile_id"]
-        assert call(client, "connection_update", profile_id=first["profile_id"], changes={"name": "Renamed"})["version"] == 2
-        assert call(client, "connection_delete", profile_id=second["profile_id"])["deleted"]
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
-        stored = call(client, "connection_get", profile_id=first["profile_id"])
-        assert stored["name"] == "Renamed"
-        assert stored["version"] == 2
-        assert call(client, "connection_list")["total"] == 1
+        assert call(client, "terminal_create", profile_id=second["profile_id"])["code"] == "PROFILE_NOT_FOUND"
+        search = call(client, "connection_list", name="BOX", tag="demo", limit=1)
+        assert search["connections"] == [{"profile_id": first["profile_id"], "name": "Sandbox One",
+                                            "description": None, "tags": ["demo"]}]
+        assert call(client, "connection_list", page=2, limit=1)["connections"] == []
+        for operation in ["create", "get", "update", "delete", "test"]:
+            result = call(client, "connection_" + operation, profile_id=first["profile_id"])
+            assert result["is_error"] and "fixture" not in result["message"]
+        assert admin_request(client, "PATCH", "connections/" + first["profile_id"], {"name": "Renamed"}).json()["version"] == 2
+        assert admin_request(client, "DELETE", "connections/" + second["profile_id"]).json()["deleted"]
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
+        assert call(client, "connection_list")["connections"][0]["name"] == "Renamed"
+        assert admin_request(client, "GET", "connections").json()["total"] == 1
 
 
-def test_profile_rejects_unapproved_targets_and_credentials(config):
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
-        assert profile(client, host="example.org")["code"] == "TARGET_FORBIDDEN"
-        assert profile(client, credential_ref="ungranted")["code"] == "CREDENTIAL_FORBIDDEN"
-        assert profile(client, username="root;whoami")["code"] == "INVALID_INPUT"
-        assert profile(client, auth_type="agent", credential_ref=None)["code"] == "CREDENTIAL_FORBIDDEN"
+def test_admin_profile_verifies_credential_and_form_fields(config):
+    base = {"name": "Profile", "host": "example.org", "username": "fixture", "credential_ref": "fixture"}
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
+        assert admin_request(client, "POST", "connections", {**base, "credential_ref": "missing"}).json()["code"] == "CREDENTIAL_UNAVAILABLE"
+        assert admin_request(client, "POST", "connections", {**base, "username": "root;whoami"}).status_code == 400
+        assert admin_request(client, "POST", "connections", {**base, "auth_type": "agent",
+                             "credential_ref": None}).json()["code"] == "CREDENTIAL_UNAVAILABLE"
 
 
 @pytest.mark.parametrize("host", ["-proxy", "example.org;id", "user@server", "https://server", "a..b"])
@@ -94,48 +97,30 @@ def test_ssh_handshake_deadline(config):
         config.connect_timeout = 0.25
         config.known_hosts.write_text("")
         try:
-            with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+            with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
                 created = profile(client, port=server.server_address[1])
-                assert call(client, "connection_test", profile_id=created["profile_id"])["code"] == "SSH_TIMEOUT"
+                assert admin_request(client, "POST", "connections/" + created["profile_id"] + "/test").json()["code"] == "SSH_TIMEOUT"
         finally:
             release.set()
             server.shutdown()
             thread.join(timeout=2)
 
 
-def test_web_admin_shares_agent_profiles_and_validates_credentials(config):
-    token = "a" * 64
-    headers = {"Authorization": "Bearer " + token}
-    config.web_admin_token_file = config.data_dir / "admin-token"
-    put_secret(config.web_admin_token_file, token.encode())
+def test_managed_keys_are_global_and_references_block_removal(config):
     config.managed_keys_dir = config.data_dir / "managed"
     key = config.managed_keys_dir / "web_backup" / "identity"
     key.parent.mkdir(parents=True)
     put_secret(key, (config.data_dir / "identity").read_bytes())
-    url = "/admin/connections"
-    data = {"name": "Dashboard", "host": "127.0.0.1", "username": "fixture",
-            "auth_type": "key", "credential_ref": "managed_web_backup"}
-    app = build_app(config)
-    with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
-        assert client.get(url).status_code == 403
-        assert client.get(url, headers={"Authorization": "Bearer " + TOKEN}).status_code == 403
-        assert client.get(url, headers={**headers, "Origin": "http://evil.example"}).status_code == 403
-        assert client.get(url, headers={**headers, "Host": "other.example"}).status_code == 403
-        assert client.post("/mcp", headers=headers, json={}).status_code == 401
-        created = client.post(url, headers=headers, json=data)
-        assert created.status_code == 201, created.text
-        dashboard_id = created.json()["profile_id"]
-        assert client.get(url, headers=headers).json()["profiles"][0]["profile_id"] == dashboard_id
-        assert call(client, "connection_list")["total"] == 0
-        assert client.post(url + "?owner=first", headers=headers, json=data).json()["code"] == "CREDENTIAL_FORBIDDEN"
-        shared = client.post(url + "?owner=first", headers=headers, json={**data, "credential_ref": "fixture"})
-        assert shared.status_code == 201
-        shared_id = shared.json()["profile_id"]
-        assert call(client, "connection_get", profile_id=shared_id)["name"] == "Dashboard"
-        patched = client.patch(url + "/" + shared_id + "?owner=first", headers=headers, json={"name": "Shared"})
-        assert patched.json()["version"] == 2
-        assert call(client, "connection_get", profile_id=shared_id)["name"] == "Shared"
-        assert client.delete(url + "/" + shared_id + "?owner=first", headers=headers).json()["deleted"]
-        assert client.delete(url + "/" + dashboard_id, headers=headers).json()["deleted"]
-    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("192.0.2.10", 51000)) as client:
-        assert client.get(url, headers=headers).status_code == 403
+    (key.parent / "key.json").write_text("{}")
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
+        assert client.get("/admin/connections").status_code == 403
+        assert client.get("/admin/keys", headers={"Authorization": "Bearer " + TOKEN}).status_code == 403
+        row = global_profile(client, credential_ref="managed_web_backup")
+        refs = admin_request(client, "GET", "keys").json()["references"]
+        assert refs["web_backup"][0]["profile_id"] == row["profile_id"]
+        vault = {"vault": str(config.managed_keys_dir)}
+        assert admin_request(client, "POST", "keys/web_backup/delete", vault).status_code == 409
+        assert key.exists()
+        assert admin_request(client, "DELETE", "connections/" + row["profile_id"]).status_code == 200
+        assert admin_request(client, "POST", "keys/web_backup/delete", vault).status_code == 200
+        assert not key.exists()

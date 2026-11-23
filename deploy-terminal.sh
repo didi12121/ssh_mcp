@@ -20,6 +20,8 @@ case "${1:-}" in
     flock -n 9
     if systemctl --user is-active --quiet "$unit"; then
       PYTHONPATH="$project/src" .venv/bin/python -m persistent_terminal_mcp.main preflight
+      directory="$(mktemp -d .data/terminal-config-before-upgrade.XXXXXX)"
+      cp -p .env "$directory/.env"
       systemctl --user stop "$unit"
     fi
     uv sync --locked --no-dev --no-editable --reinstall-package persistent-terminal-mcp

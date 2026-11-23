@@ -67,6 +67,7 @@ operations:
 
     const hosts = textPayload(await client.callTool({ name: "list_hosts", arguments: {} }));
     assert.equal((hosts.hosts as Array<{ id: string }>)[0]?.id, "demo");
+    assert.deepEqual(Object.keys((hosts.hosts as object[])[0]!).sort(), ["description", "id", "tags"]);
 
     const operation = await client.callTool({
       name: "run_operation",

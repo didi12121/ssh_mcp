@@ -17,28 +17,26 @@ bash deploy-terminal.sh status
 
 脚本使用 Linux 用户级 systemd 和 `uv`，支持 `start`、`stop`、`restart`、`status`、`logs` 与 `update`。传入新版本源文件后执行 `update`。开发时也可直接运行 `uv run --locked terminal-mcp migrate` 和 `uv run --locked terminal-mcp serve`。启动会检查数据库版本，执行初始迁移，并重新标记旧进程的 SSH 和普通任务状态。一个数据目录只运行一个服务进程。
 
-### 身份和 SSH 凭据
+### 全局 SSH 连接和 MCP Token
 
-通过 SSH 隧道登录现有管理页，在「Agent 管理」创建身份，设置主机、凭据、工作区和执行权限。进入「MCP Token」为该身份创建令牌，将弹窗中一次性显示的值保存到客户端的 `PTMCP_TOKEN` 环境变量，一个 Agent 可以同时持有多个 Token。
+1. 在「密钥库」导入或生成 SSH 私钥，将公钥加入目标账号。在「SSH 连接」添加服务器，选择全局凭据，再测试连接。每台服务器只需配置一次。
+2. 在「MCP Token」填写名称并选择允许访问的连接、Shell、独立命令、预定义 argv、工作区和有效期。未选择的连接不会获准访问，包括之后新建的连接。
+3. 复制弹窗中一次性显示的 Token，在 MCP 客户端使用 `PTMCP_TOKEN`。新 Token 自动建立内部身份。只有主动使用「附加 Token」才会共享身份，附加 Token 的授权需单独选择。
 
-每个 MCP 请求都从 SQLite 查询令牌及当前权限，资源继续由稳定的 `owner_id` 持有。数据库保存 SHA-256 摘要。默认有效期为 90 天，可用 `PTMCP_TOKEN_DEFAULT_DAYS` 修改；表单还提供若干预设、自定义到期时间和显式选择的永不过期。过期按 UTC 实时判定，最近使用时间表示成功认证时间，默认每 60 秒最多更新一次。
+Profile 与执行权限由 Token 分别授权。访问终端时还要求当前 Token 的 `owner_id`、工作区、Profile 授权和连接绑定版本均匹配。禁用连接或移除授权会阻止之后的操作，保留远端任务和历史数据；重新授予同一连接绑定后可以继续访问。改名或备注保留授权。改地址、端口、用户或凭据会撤销原授权；重新授权只允许新的连接绑定，旧终端可从该连接的「管理终端」关闭。管理清理会拒绝自动中止仍在运行的 detached 任务。
 
-轮换会在同一事务中签发继承原到期时间的新密钥并撤销旧密钥。撤销单个 Token 不影响同一身份的其他 Token。删除保留撤销审计记录。禁用身份会立即拒绝该身份后续的请求，重新启用后仍有效的 Token 可继续访问原有资源。以上操作不会终止已接受的命令或远端 detached 任务。签发和轮换支持 `Idempotency-Key` UUID，重复请求返回冲突，首次返回的明文不可再次读取。
+轮换在同一事务中签发新密钥并撤销旧密钥，可继承原到期时间或重新设置；内部身份、Profile 授权和终端历史保留。撤销或删除只影响该枚 Token。默认有效期为 90 天，通过 `PTMCP_TOKEN_DEFAULT_DAYS` 调整。令牌签发和轮换支持 `Idempotency-Key` UUID，重复请求返回冲突。最近使用表示成功认证时间，默认每 60 秒最多更新一次。
 
-默认只允许明确授予的主机、凭据和工作区。交互式 Shell 和自定义独立命令分别授权，获得交互式 Shell 权限的 Agent 可以在其中输入命令。受限身份通过 `operation` 执行预定义 argv，例如 `{"uptime":["uptime"],"disk_usage":["df","-h"]}`。互不信任的完整 Shell 身份应使用独立的远端 Unix 账号。嵌入部署可向 `build_app(..., approve=回调)` 传入异步审批策略，拦截 Shell 输入或独立执行。
+MCP 的 `connection_list` 只返回连接别名、不透明的 ID、描述和标签。SSH 连接的新增、详情、修改、测试和删除属于 Web 管理 API。拥有任意 Shell 或自定义命令权限的 Agent 仍可通过远端命令查看该 SSH 账号能看到的信息。互不信任的 Agent 应使用隔离的远端 Unix 账号。嵌入部署可向 `build_app(..., approve=回调)` 提供异步审批策略。
 
-管理 API 复用独立的 Web 管理员令牌，浏览器通过 TypeScript 服务代理到本机 Python 服务的 `/admin/agents` 和 `/admin/tokens`。令牌签发、轮换、撤销和删除按分钟限流，默认 30 次。敏感响应禁止缓存，签发、轮换和权限修改写入结构化审计日志。
+### 旧数据库迁移
 
-### 旧身份迁移与升级
+1. 在备份生产配置并结束前台执行后，将新源码放入 Python 服务目录，保留 `.env`、数据库和凭据。运行 `bash deploy-terminal.sh update`。脚本检查正在运行的前台任务，备份 `.env`，停止旧服务，再进行迁移。
+2. 新版使用 Schema 3。迁移从 Schema 2 读取旧身份权限，也支持 Schema 1 导入旧 `principals.json`。SQLite 一致性备份与 `report.json` 写入 `PTMCP_DATA_DIR/migration-backups/`。迁移保留所有原 ID、Token 摘要、撤销状态和会话快照，验证行数及外键。Token 仅获得原身份拥有且主机与旧凭据策略都匹配的连接。旧快照与当前连接绑定不一致，或无法推定时，报告会列出待处理条目。
+3. 用旧 Token 验证 `connection_list`、`terminal_list` 和原 tmux 恢复。再在 TypeScript 服务目录运行 `bash deploy-user.sh update`，使用原管理员令牌确认三个导航页。普通前台 SSH Channel 无法跨进程重启恢复，远端 tmux 和 detached 任务可按原规则恢复。
+4. 若迁移失败，数据库事务回滚。只有确认 Schema 未提交升级时，才直接恢复原程序。升级后旧程序会拒绝打开 Schema 3。若已使用新授权或撤销令牌，应保留新数据库并修复当前程序；恢复旧备份前须复核其后的撤销和授权变更。
 
-1. 在保留 `.env`、数据库、凭据和原 `principals.json` 的前提下上传新源码。关闭新任务入口或选择维护时段，等前台执行结束。
-2. 运行 Python 服务目录下的 `bash deploy-terminal.sh update`。脚本先核对数据库版本与前台任务，停止旧服务，再执行版本 1 → 2 的迁移。独立运行 `uv run --locked terminal-mcp migrate` 时，应先停旧进程。
-3. 迁移会在 `PTMCP_DATA_DIR/migration-backups/` 中创建只供服务账号访问的 SQLite 一致性备份和旧 Principal 文件备份。迁移在一笔事务内建立身份和 Token 表、核对导入数量和外键，再提交 Schema 版本。无创建时间的旧 Token 用导入时间标记，原哈希和原有不过期语义保留。遇到重复哈希或同一 Agent 的冲突权限，迁移会停止。
-4. 用同一个旧 Token 验证 MCP 初始化、工具发现和 `connection_list`、`terminal_list`。更新 TypeScript 管理端后，用原管理员令牌核对 Agent、Token 和连接管理页面。
-
-升级后 SQLite 是唯一认证来源。重复执行迁移不会覆盖权限或重新导入已撤销的旧令牌。旧版程序会拒绝打开版本 2 数据库。若首次迁移失败且版本仍为 1，可恢复原程序与版本 1 数据。版本 2 启用并产生撤销或权限调整后，应保留版本 2 数据库并修复程序，避免恢复版本 1 的旧令牌状态。恢复较旧的版本 2 备份时，需先离线复核备份后发生的撤销和授权变更，再开放服务。
-
-重启会关闭普通 SSH Channel，无法无损恢复正在运行的前台命令。远端 tmux 和 detached 任务继续遵循原有恢复机制。
+### SSH 凭据
 
 在 `.data/terminal/credentials.json` 维护凭据引用。可使用已有密钥管理页面生成的私钥文件，示例路径需按实际部署位置修改。
 
@@ -61,14 +59,13 @@ uv run --locked terminal-mcp encrypt .data/terminal/master.key .data/terminal/we
 
 ### MCP 工作流程
 
-在 SSH 管理页的「SSH 连接」中可新增、编辑、测试和删除连接。启用连接、Agent 和 Token 管理时，先在 TypeScript 的 `admin` 配置中设置 `terminalAdminPort: 8766`，再在 Python 服务的 `.env` 设置 `PTMCP_WEB_ADMIN_TOKEN_FILE` 和 `PTMCP_MANAGED_KEYS_DIR`，分别指向页面的管理员令牌文件和 SSH 密钥库。管理代理与 Python 服务须共享同一回环网络，并能读取各自配置所引用的文件。
+在 SSH 管理页的「SSH 连接」中可新增、编辑、测试和删除连接。启用连接和 Token 管理时，先在 TypeScript 的 `admin` 配置中设置 `terminalAdminPort: 8766`，再在 Python 服务的 `.env` 设置 `PTMCP_WEB_ADMIN_TOKEN_FILE` 和 `PTMCP_MANAGED_KEYS_DIR`，分别指向页面的管理员令牌文件和 SSH 密钥库。管理代理与 Python 服务须共享同一回环网络，并能读取各自配置所引用的文件。
 
-选择「管理面板」可使用密钥库中的私钥。若要让某个 Agent 在 MCP 中发现和使用连接，请在新增时选择对应的 Agent 身份，该身份须已获目标和凭据授权。授权密钥库中的私钥时使用 `managed_密钥ID`。网页测试会校验终端服务的 `known_hosts`。
+密钥库显示连接和未关闭终端的引用。删除密钥时，联网的两个服务需要使用同一个托管密钥目录。全局连接通过 `managed_密钥ID` 引用私钥，也可以使用凭据清单中的引用。网页测试会校验终端服务的 `known_hosts`。
 
 | 操作 | 工具与参数 |
 |---|---|
-| 添加与检查连接 | `connection_create` 传 `name`、`host`、`port`、`username`、`auth_type`、`credential_ref` 和可选 `tags`。再以返回的 `profile_id` 调用 `connection_test` |
-| 查找与维护连接 | `connection_list` 支持 `name`、`host`、`tag`、`page` 和 `limit`。用 `connection_get` 查看详情，`connection_update` 传 `changes`，`connection_delete` 删除闲置配置 |
+| 查找服务器 | `connection_list` 支持 `name`、`tag`、`page` 和 `limit`，仅返回本 Token 获准访问的连接 |
 | 创建与切换终端 | `terminal_create` 使用 `profile_id`、`name` 和 `workspace_id`。用 `terminal_list` 发现已有会话，再用 `terminal_activate` 切换工作区默认终端 |
 | 操作持续 Shell | `terminal_send` 传 `input: "cd /tmp\nexport DEMO=hello\n"`。后续发送 `"pwd\necho $DEMO\n"` 会沿用该 Shell。用 `terminal_signal` 发送 `CTRL_C` 或 `CTRL_D`，用 `terminal_resize` 调整尺寸 |
 | 并行执行 | 调用多个 `terminal_exec`。完整权限使用 `command` 和可选绝对 `cwd`，受限权限使用命名的 `operation`。普通命令和持续 Shell 互不切换工作目录 |
@@ -144,9 +141,9 @@ PTMCP_TEST_SSH_IMAGE=ssh-mcp-test-sshd:local uv run --locked --extra test pytest
 
 Docker 测试临时启动独立的 OpenSSH 和 tmux，覆盖单连接多 Channel、PTY Shell 状态、进程级信号、输出限额、身份隔离、重启恢复和 detached 退出码。默认测试命令在没有测试镜像变量时跳过 Docker 用例。
 
-在 Ubuntu 上，Python 测试 42 项通过（含 14 个真实 OpenSSH 场景），覆盖旧库迁移、Token 生命周期、动态权限、网页连接管理和终端故障恢复。TypeScript 测试 11 项通过。使用最终 Python wheel 与相同锁定依赖在非 root Compose 环境验证了旧 Token 导入、轮换和官方 MCP SDK 接入。
+在 Ubuntu 上，Python 测试 44 项通过（含 15 个真实 OpenSSH 场景），覆盖全局授权、旧库迁移、同身份 Token 隔离及 tmux 恢复。TypeScript 测试 11 项通过。隔离的 systemd 实验从正在运行的 Schema 2 服务升级到 Schema 3，使用原 Token 完成 MCP 初始化，核对原 Profile 和 Session ID。
 
-可在 Node.js 22+ 上执行浏览器测试。先运行 `npm run build`，设置 `PTMCP_TEST_PYTHON` 为项目虚拟环境的 Python 路径，设置 `PTMCP_TEST_CHROME` 为 Chrome 可执行文件路径，然后运行 `node tests/browser_identity.mjs`。测试启动独立的本地管理端和 MCP 服务，验证一次性明文、剪贴板、关闭弹窗清空、轮换和撤销。
+可在 Node.js 22+ 上执行浏览器测试。先运行 `npm run build`，设置 `PTMCP_TEST_PYTHON` 为项目虚拟环境的 Python 路径，设置 `PTMCP_TEST_CHROME` 为 Chrome 可执行文件路径，然后运行 `node tests/browser_identity.mjs`。测试启动独立的本地管理端和 MCP 服务，验证创建全局连接、签发与复制 Token、更新授权、轮换和撤销。
 
 ## 原 TypeScript 服务
 
@@ -347,7 +344,7 @@ ssh -N -L 8788:127.0.0.1:8788 user@ssh-mcp-server
 
 ## 暴露的工具
 
-- `list_hosts`：列出启用的主机别名，不暴露私钥路径。
+- `list_hosts`：列出启用的主机别名，以及备注和标签。
 - `list_operations(host_id)`：列出某台主机允许的操作和参数说明。
 - `test_connection(host_id)`：测试严格 host key 校验及非交互密钥认证。
 - `run_operation(host_id, operation_id, parameters)`：执行预定义只读操作。

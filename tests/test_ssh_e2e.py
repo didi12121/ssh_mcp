@@ -11,8 +11,9 @@ import httpx
 import pytest
 from starlette.testclient import TestClient
 
-from conftest import LIMITED, OTHER, TOKEN, call, profile, put_secret
-from test_identities import admin_app, admin_request, create_agent, issue_token, mcp_status
+from conftest import LIMITED, OTHER, TOKEN, admin_request, call, global_profile, profile, put_secret
+from test_identities import admin_app, issue_token, mcp_status
+from test_token_migration import version_two, SESSION_ID, PROFILE_ID, EXECUTION_ID
 from persistent_terminal_mcp.server import build_app
 from persistent_terminal_mcp.backends import Remote
 from persistent_terminal_mcp.errors import ToolError
@@ -72,15 +73,15 @@ def finished(client, session: str, execution: str, token: str = TOKEN) -> dict:
 
 def test_real_tmux_channels_restart_and_detached(config, sshd):
     container, port = sshd
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         config_id = profile(client, port=port)["profile_id"]
-        tested = call(client, "connection_test", profile_id=config_id)
+        tested = admin_request(client, "POST", f"connections/{config_id}/test").json()
         assert tested["authenticated"] and tested["tmux_available"]
         created = call(client, "terminal_create", profile_id=config_id, name="persistent")
         assert not created["is_error"], created
         session = created["session_id"]
         assert call(client, "terminal_create", profile_id=config_id, name="persistent")["reused"]
-        assert call(client, "connection_delete", profile_id=config_id)["code"] == "PROFILE_IN_USE"
+        assert admin_request(client, "DELETE", f"connections/{config_id}").json()["code"] == "PROFILE_IN_USE"
         assert call(client, "terminal_send", session_id=session, input="cd /tmp\nexport PERSISTENT_MARKER=retained\n")["input_bytes"]
         call(client, "terminal_send", session_id=session,
              input="printf '%s:%s\\n' \"$(pwd)\" \"$PERSISTENT_MARKER\"\n")
@@ -112,11 +113,11 @@ def test_real_tmux_channels_restart_and_detached(config, sshd):
         unconfirmed = call(client, "terminal_exec", session_id=session,
                            command="echo once >> /tmp/foreground-count; sleep 9", yield_time_ms=120)
         assert unconfirmed["status"] == "RUNNING"
-        edited = call(client, "connection_update", profile_id=config_id, changes={"port": 1})
-        assert edited["unchanged_session_ids"] == [session]
+        edited = admin_request(client, "PATCH", f"connections/{config_id}", {"name": "New label"}).json()
+        assert edited["session_ids"] == [session]
         logs = subprocess.run(["docker", "logs", container], capture_output=True, check=True, text=True).stderr
         assert logs.count("Accepted publickey for fixture") == 2  # One probe and one managed login.
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         assert call(client, "terminal_list")["terminals"][0]["status"] == "DISCONNECTED"
         call(client, "terminal_send", session_id=session,
              input="printf '%s:%s\\n' \"$(pwd)\" \"$PERSISTENT_MARKER\"\n")
@@ -134,7 +135,7 @@ def test_real_tmux_channels_restart_and_detached(config, sshd):
         logs = subprocess.run(["docker", "logs", container], capture_output=True, check=True, text=True).stderr
         assert logs.count("Accepted publickey for fixture") == 4  # One recovery per disconnect.
         assert call(client, "terminal_close", session_id=session, preserve_remote=False)["status"] == "CLOSED"
-        assert call(client, "connection_delete", profile_id=config_id)["deleted"]
+        assert admin_request(client, "DELETE", f"connections/{config_id}").json()["deleted"]
 
 
 def test_real_failures_and_restricted_access(config, sshd):
@@ -143,13 +144,13 @@ def test_real_failures_and_restricted_access(config, sshd):
     identity = config.data_dir / "identity"
     original = identity.read_bytes()
     wrong = asyncssh.generate_private_key("ssh-ed25519")
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         profile_id = profile(client, LIMITED, port=port)["profile_id"]
         put_secret(config.known_hosts, f"[127.0.0.1]:{port} ".encode() + wrong.export_public_key())
-        assert call(client, "connection_test", LIMITED, profile_id=profile_id)["code"] == "HOST_KEY_UNVERIFIED"
+        assert admin_request(client, "POST", f"connections/{profile_id}/test").json()["code"] == "HOST_KEY_UNVERIFIED"
         put_secret(config.known_hosts, pinned)
         put_secret(identity, wrong.export_private_key())
-        assert call(client, "connection_test", LIMITED, profile_id=profile_id)["code"] == "SSH_AUTH_FAILED"
+        assert admin_request(client, "POST", f"connections/{profile_id}/test").json()["code"] == "SSH_AUTH_FAILED"
         put_secret(identity, original)
         result = call(client, "terminal_create", LIMITED, profile_id=profile_id)
         assert result["backend"] == "exec", result
@@ -179,9 +180,9 @@ def test_pty_fallback_deadlines_and_output_limits(config, sshd):
     config.execution_timeout = 2
     config.output_max_bytes = 16384
     config.max_executions_per_session = 1
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         profile_id = profile(client, port=port)["profile_id"]
-        assert not call(client, "connection_test", profile_id=profile_id)["tmux_available"]
+        assert not admin_request(client, "POST", f"connections/{profile_id}/test").json()["tmux_available"]
         result = call(client, "terminal_create", profile_id=profile_id)
         assert result["backend"] == "pty" and not result["recoverable"], result
         session = result["session_id"]
@@ -198,9 +199,8 @@ def test_pty_fallback_deadlines_and_output_limits(config, sshd):
         assert not any("�" in entry["text"] for entry in page["entries"])
         assert call(client, "terminal_close", session_id=session, preserve_remote=True)["status"] == "CLOSED"
         assert call(client, "terminal_status", session_id=session, reconnect=True)["code"] == "TERMINAL_CLOSED"
-        with sqlite3.connect(config.data_dir / "terminal.db") as db:
-            db.execute("UPDATE agent_identities SET permissions_json=json_set(permissions_json, '$.shell', json('false')) "
-                       "WHERE owner_id='first'")
+        legacy = admin_request(client, "GET", "tokens?owner=first").json()["tokens"][0]
+        admin_request(client, "PATCH", f"tokens/{legacy['token_id']}/permissions", {"shell": False})
         assert call(client, "terminal_read", session_id=session)["code"] == "SHELL_FORBIDDEN"
 
 
@@ -276,7 +276,7 @@ with socket.socket() as listener:
     if remote_exists:
         docker("exec", "-u", "fixture", container, "tmux", "-L", "persistent-terminal-mcp",
                "send-keys", "-t", "t_" + session_id, "export BEFORE_CRASH=preserved", "Enter")
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         result = call(client, "terminal_create", profile_id=profile_id)
         assert result["status"] == "READY" and result["session_id"] == session_id and result["reused"]
         call(client, "terminal_send", session_id=session_id,
@@ -289,7 +289,7 @@ with socket.socket() as listener:
         assert call(client, "terminal_status", session_id=session_id, reconnect=True)["code"] == "TMUX_SESSION_LOST"
         assert call(client, "terminal_create", profile_id=profile_id)["code"] == "TMUX_SESSION_LOST"
         assert not call(client, "terminal_status", session_id=session_id)["recoverable"]
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         assert not call(client, "terminal_status", session_id=session_id)["recoverable"]
         assert call(client, "terminal_close", session_id=session_id, preserve_remote=False)["status"] == "CLOSED"
 
@@ -299,13 +299,13 @@ def test_transport_abort_is_detected_and_parallel_recovery_is_single(config, ssh
     connections = []
     original = SSHConnectionManager.connect
 
-    async def capture(self, principal, data):
-        ssh = await original(self, principal, data)
+    async def capture(self, data):
+        ssh = await original(self, data)
         connections.append(ssh.connection)
         return ssh
 
     monkeypatch.setattr(SSHConnectionManager, "connect", capture)
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         profile_id = profile(client, port=port)["profile_id"]
         row = call(client, "terminal_create", profile_id=profile_id)
         session_id = row["session_id"]
@@ -332,7 +332,7 @@ def wait_for_worker(client, session, item):
 @pytest.mark.parametrize("fault", ["worker_kill", "tmux_lost", "write_failure", "process_kill"])
 def test_detached_faults_never_claim_success(config, sshd, fault):
     container, port = sshd
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         session = call(client, "terminal_create", profile_id=profile(client, port=port)["profile_id"])["session_id"]
         created = call(client, "terminal_exec", session_id=session, execution_mode="detached",
                        command="echo once >> /tmp/fault-count; exec sleep 9", yield_time_ms=10)
@@ -367,7 +367,7 @@ def test_detached_transport_loss_after_launch_does_not_replay(config, sshd, monk
         raise ToolError("REMOTE_UNAVAILABLE", "Injected loss of the launch response.")
 
     monkeypatch.setattr(Remote, "detach", interrupt)
-    with TestClient(build_app(config), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         session = call(client, "terminal_create", profile_id=profile(client, port=port)["profile_id"])["session_id"]
         submitted = call(client, "terminal_exec", session_id=session, execution_mode="detached",
                          command="echo once >> /tmp/launch-count; sleep 1; exit 11")
@@ -391,7 +391,7 @@ def test_approval_and_close_do_not_affect_other_sessions(config, sshd):
         return command not in {"denied", "denied\n", "\x03"}
 
     config.idle_timeout = 1
-    with TestClient(build_app(config, approve=approve), base_url="http://127.0.0.1") as client:
+    with TestClient(build_app(config, approve=approve), base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
         profile_id = profile(client, port=port)["profile_id"]
         one = call(client, "terminal_create", profile_id=profile_id, name="one")["session_id"]
         two = call(client, "terminal_create", profile_id=profile_id, name="two")["session_id"]
@@ -418,44 +418,79 @@ def test_approval_and_close_do_not_affect_other_sessions(config, sshd):
         assert output(client, two, second["execution_id"]).strip() == "alive"
 
 
-def test_managed_tokens_preserve_live_terminal_and_apply_permission_changes(config, sshd):
+def test_profile_revoke_regrant_rotation_and_shared_owner_sessions(config, sshd):
     _, port = sshd
     with admin_app(config) as client:
-        create_agent(client, targets=["127.0.0.1"], credentials=["fixture"], workspaces=["ops"],
-                     shell=True, custom_commands=True, commands={"uptime": ["uptime"]})
-        first, second = issue_token(client), issue_token(client, name="Other client")
-        first_secret, second_secret = first["token"], second["token"]
-        p = profile(client, first_secret, port=port)["profile_id"]
-        created = call(client, "terminal_create", first_secret, profile_id=p, workspace_id="ops")
+        prod = global_profile(client, port=port, name="Production")["profile_id"]
+        nas = global_profile(client, port=port, name="NAS")["profile_id"]
+        first = issue_token(client, allowed_profile_ids=[prod, nas], shell=True, custom_commands=True,
+                            workspaces=["ops"], commands={"uptime": ["uptime"]})
+        attached = issue_token(client, attach_to_token_id=first["token_id"], allowed_profile_ids=[nas],
+                               shell=True, custom_commands=True, workspaces=["ops"])
+        independent = issue_token(client, allowed_profile_ids=[prod], shell=True, workspaces=["ops"])
+        first_secret, attached_secret = first["token"], attached["token"]
+        created = call(client, "terminal_create", first_secret, profile_id=prod, workspace_id="ops")
         session = created["session_id"]
         assert call(client, "terminal_send", first_secret, session_id=session, input="export OWNER_SCOPE=retained\n")["input_bytes"]
-        denied = call(client, "terminal_status", OTHER, session_id=session)
-        assert denied["code"] == "SESSION_NOT_FOUND"
+        for wrong in (attached_secret, independent["token"]):
+            assert call(client, "terminal_status", wrong, session_id=session)["code"] == "SESSION_NOT_FOUND"
+        for tool, extra in (("terminal_activate", {}), ("terminal_read", {}), ("terminal_signal", {"signal": "CTRL_C"}),
+                            ("terminal_close", {}), ("terminal_exec", {"command": "pwd"})):
+            assert call(client, tool, attached_secret, session_id=session, **extra)["code"] == "SESSION_NOT_FOUND"
         job = call(client, "terminal_exec", first_secret, session_id=session, execution_mode="detached",
                    command="printf begin; sleep 2; printf end; exit 6", yield_time_ms=25)
-        assert not job["is_error"], job
         execution = job["execution_id"]
-        assert call(client, "terminal_read", OTHER, session_id=session, execution_id=execution)["code"] == "SESSION_NOT_FOUND"
-        assert admin_request(client, "PATCH", "agents/automation", {"enabled": False}).status_code == 200
-        assert mcp_status(client, first_secret) == mcp_status(client, second_secret) == 401
-        assert admin_request(client, "PATCH", "agents/automation", {"enabled": True}).status_code == 200
-        new = admin_request(client, "POST", f"tokens/{first['token_id']}/rotate").json()["token"]
-        assert mcp_status(client, first_secret) == 401 and mcp_status(client, new) == 200
-        assert call(client, "connection_get", new, profile_id=p)["owner_id"] == "automation"
-        assert call(client, "terminal_list", second_secret)["terminals"][0]["session_id"] == session
-        echo = call(client, "terminal_send", new, session_id=session,
+        scope = f"tokens/{first['token_id']}/permissions"
+        assert admin_request(client, "PATCH", scope, {"allowed_profile_ids": [nas]}).status_code == 200
+        assert call(client, "terminal_list", first_secret)["terminals"] == []
+        assert call(client, "terminal_exec", first_secret, session_id=session, command="pwd")["code"] == "SESSION_NOT_FOUND"
+        assert call(client, "terminal_read", first_secret, session_id=session, execution_id=execution)["code"] == "SESSION_NOT_FOUND"
+        assert admin_request(client, "PATCH", scope, {"allowed_profile_ids": [prod, nas]}).status_code == 200
+        new = admin_request(client, "POST", f"tokens/{first['token_id']}/rotate").json()
+        assert new["owner_id"] == first["owner_id"] and set(new["allowed_profile_ids"]) == {prod, nas}
+        assert mcp_status(client, first_secret) == 401 and mcp_status(client, new["token"]) == 200
+        token = new["token"]
+        assert call(client, "terminal_list", token)["terminals"][0]["session_id"] == session
+        echo = call(client, "terminal_send", token, session_id=session,
                     input="printf 'confirmation:%s\\n' \"$OWNER_SCOPE\"\n")
         assert not echo["is_error"], echo
-        until(lambda: "confirmation:retained" in output(client, session, token=new))
-        assert until(lambda: finished(client, session, execution, new))["exit_code"] == 6
-        assert output(client, session, execution, new) == "beginend"
-        assert admin_request(client, "PATCH", "agents/automation", {"shell": False, "custom_commands": False}).status_code == 200
-        assert call(client, "terminal_send", new, session_id=session, input="pwd\n")["code"] == "SHELL_FORBIDDEN"
-        assert call(client, "terminal_exec", new, session_id=session, command="pwd")["code"] == "COMMAND_FORBIDDEN"
-        assert call(client, "terminal_exec", new, session_id=session, operation="uptime")["exit_code"] == 0
-        assert admin_request(client, "PATCH", "agents/automation", {"credentials": []}).status_code == 200
-        assert call(client, "terminal_exec", new, session_id=session, operation="uptime")["code"] == "CREDENTIAL_FORBIDDEN"
-        assert admin_request(client, "PATCH", "agents/automation", {"credentials": ["fixture"], "targets": []}).status_code == 200
-        assert call(client, "terminal_create", new, profile_id=p, workspace_id="ops")["code"] == "TARGET_FORBIDDEN"
-        assert admin_request(client, "PATCH", "agents/automation", {"targets": ["127.0.0.1"], "workspaces": []}).status_code == 200
-        assert call(client, "terminal_status", new, session_id=session)["code"] == "WORKSPACE_FORBIDDEN"
+        until(lambda: "confirmation:retained" in output(client, session, token=token))
+        assert until(lambda: finished(client, session, execution, token))["exit_code"] == 6
+        assert output(client, session, execution, token) == "beginend"
+        permissions = f"tokens/{new['token_id']}/permissions"
+        assert admin_request(client, "PATCH", permissions, {"shell": False, "custom_commands": False}).status_code == 200
+        assert call(client, "terminal_send", token, session_id=session, input="pwd\n")["code"] == "SHELL_FORBIDDEN"
+        assert call(client, "terminal_exec", token, session_id=session, command="pwd")["code"] == "COMMAND_FORBIDDEN"
+        assert call(client, "terminal_exec", token, session_id=session, operation="uptime")["exit_code"] == 0
+        assert admin_request(client, "PATCH", permissions, {"workspaces": []}).status_code == 200
+        assert call(client, "terminal_status", token, session_id=session)["code"] == "SESSION_NOT_FOUND"
+        assert admin_request(client, "PATCH", permissions, {"workspaces": ["ops"]}).status_code == 200
+        assert admin_request(client, "PATCH", f"connections/{prod}", {"enabled": False}).status_code == 200
+        assert call(client, "terminal_status", token, session_id=session)["code"] == "SESSION_NOT_FOUND"
+        assert admin_request(client, "PATCH", f"connections/{prod}", {"enabled": True}).status_code == 200
+        assert call(client, "terminal_status", token, session_id=session)["session_id"] == session
+        assert admin_request(client, "PATCH", f"connections/{prod}", {"port": 1}).json()["grants_invalidated"]
+        assert admin_request(client, "PATCH", permissions, {"allowed_profile_ids": [prod, nas]}).status_code == 200
+        assert call(client, "terminal_status", token, session_id=session)["code"] == "SESSION_NOT_FOUND"
+        closed = admin_request(client, "POST", f"connections/{prod}/sessions/{session}/close")
+        assert closed.status_code == 200 and closed.json()["status"] == "CLOSED"
+
+
+def test_real_legacy_tmux_is_reattached_after_v2_database_migration(config, sshd):
+    container, port = sshd
+    version_two(config)
+    name = "t_" + SESSION_ID
+    with sqlite3.connect(config.data_dir / "terminal.db") as db:
+        db.execute("UPDATE profiles SET configuration=json_set(configuration,'$.port',?) WHERE profile_id=?",
+                   (port, PROFILE_ID))
+        db.execute("UPDATE sessions SET backend='tmux', tmux_session_name=?, snapshot=json_set(snapshot, '$.port', ?) "
+                   "WHERE session_id=?", (name, port, SESSION_ID))
+    docker("exec", "-u", "fixture", container, "tmux", "-L", "persistent-terminal-mcp", "new-session", "-d", "-s", name)
+    docker("exec", "-u", "fixture", container, "tmux", "-L", "persistent-terminal-mcp",
+           "send-keys", "-t", name, "export MIGRATED_TMUX=untouched", "Enter")
+    with admin_app(config) as client:
+        assert call(client, "connection_list")["connections"][0]["profile_id"] == PROFILE_ID
+        assert call(client, "terminal_list")["terminals"][0]["session_id"] == SESSION_ID
+        assert call(client, "terminal_status", session_id=SESSION_ID, execution_id=EXECUTION_ID)["exit_code"] == 7
+        call(client, "terminal_send", session_id=SESSION_ID, input="printf 'legacy-result:%s\\n' \"$MIGRATED_TMUX\"\n")
+        until(lambda: "legacy-result:untouched" in output(client, SESSION_ID))

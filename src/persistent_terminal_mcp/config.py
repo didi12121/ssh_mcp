@@ -12,7 +12,16 @@ Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
 class Principal(BaseModel):
     owner_id: Identifier
-    targets: list[str] = Field(default_factory=list)  # Exact hostnames/IP addresses.
+    token_id: str | None = None
+    profile_grants: dict[str, int] = Field(default_factory=dict)
+    workspaces: set[Identifier] = Field(default_factory=lambda: {"default"})
+    shell: bool = False
+    custom_commands: bool = False
+    commands: dict[Identifier, list[str]] = Field(default_factory=dict)
+
+
+class LegacyPolicy(BaseModel):
+    targets: list[str] = Field(default_factory=list)
     credentials: set[CredentialRef] = Field(default_factory=set)
     workspaces: set[Identifier] = Field(default_factory=lambda: {"default"})
     shell: bool = False
@@ -21,15 +30,10 @@ class Principal(BaseModel):
     ssh_agent: bool = False
 
 
-class LegacyPrincipal(BaseModel):
+class LegacyPrincipal(LegacyPolicy):
     owner_id: Identifier
     token_sha256: Digest
     targets: list[str] = Field(min_length=1)
-    credentials: set[CredentialRef] = Field(default_factory=set)
-    workspaces: set[Identifier] = Field(default_factory=lambda: {"default"})
-    shell: bool = False
-    commands: dict[Identifier, list[str]] = Field(default_factory=dict)
-    ssh_agent: bool = False
 
 class Credential(BaseModel):
     kind: Literal["key", "password", "encrypted_key"]

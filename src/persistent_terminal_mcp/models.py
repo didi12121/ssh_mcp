@@ -24,6 +24,7 @@ class ProfileInput(BaseModel):
     auth_type: Literal["key", "agent", "password"] = "key"
     credential_ref: CredentialRef | None = None
     tags: list[str] = Field(default_factory=list, max_length=32)
+    enabled: bool = True
 
     @field_validator("host")
     @classmethod
@@ -60,6 +61,12 @@ class ProfilePatch(BaseModel):
     auth_type: Literal["key", "agent", "password"] | None = None
     credential_ref: CredentialRef | None = None
     tags: list[str] | None = None
+    enabled: bool | None = None
+
+
+def profile_binding(data: dict) -> tuple:
+    return (data.get("host"), data.get("port", 22), data.get("username"),
+            data.get("auth_type", "key"), data.get("credential_ref"))
 
 
 class Base(DeclarativeBase):
@@ -69,8 +76,11 @@ class Base(DeclarativeBase):
 class Profile(Base):
     __tablename__ = "profiles"
     profile_id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    owner_id: Mapped[str] = mapped_column(index=True)
+    owner_id: Mapped[str] = mapped_column(index=True, default="dashboard")
     version: Mapped[int] = mapped_column(default=1)
+    access_version: Mapped[int] = mapped_column(default=1, server_default="1")
+    enabled: Mapped[bool] = mapped_column(default=True, server_default="1")
+    deleted_at: Mapped[str | None]
     configuration: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[str] = mapped_column(default=now)
     updated_at: Mapped[str] = mapped_column(default=now)
@@ -84,6 +94,7 @@ class Session(Base):
     workspace_id: Mapped[str]
     profile_id: Mapped[str] = mapped_column(index=True)
     profile_version: Mapped[int]
+    profile_access_version: Mapped[int] = mapped_column(default=1, server_default="1")
     snapshot: Mapped[dict] = mapped_column(JSON)
     name: Mapped[str]
     status: Mapped[str]

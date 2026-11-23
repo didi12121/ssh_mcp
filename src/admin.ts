@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type ErrorRequestHandler } from "express";
 import type { Config } from "./config.js";
@@ -13,23 +14,16 @@ const terminalAdminRoutes = {
   connections: {
     methods: ["GET", "POST"],
     records: /^\/[a-f0-9]{32}$/u,
-    recordMethods: ["PATCH", "DELETE"],
+    recordMethods: ["GET", "PATCH", "DELETE"],
     actions: /^\/[a-f0-9]{32}\/test$/u,
-    query: ["owner", "page"],
-  },
-  agents: {
-    methods: ["GET", "POST"],
-    records: /^\/[A-Za-z][A-Za-z0-9_-]{0,63}$/u,
-    recordMethods: ["GET", "PATCH"],
-    actions: null,
-    query: ["page", "limit", "search", "catalog"],
+    query: ["page"],
   },
   tokens: {
     methods: ["GET", "POST"],
     records: /^\/[a-f0-9]{32}$/u,
     recordMethods: ["GET", "DELETE"],
     actions: /^\/[a-f0-9]{32}\/(?:rotate|revoke)$/u,
-    query: ["owner", "status", "page", "limit"],
+    query: ["owner", "status", "page", "limit", "catalog"],
   },
 };
 
@@ -84,13 +78,33 @@ export function createAdminApp(config: Config) {
     }
     res.status(401).json({ error: "Invalid administrator token." });
   });
-  app.get("/api/keys", async (_req, res) => {
+  app.get("/api/keys", async (req, res) => {
     const items = await listKeys(keys);
     const keyHosts = Object.entries(config.hosts);
+    let references: Record<string, Array<{ name: string }>> = {};
+    let referencesAvailable = !admin.terminalAdminPort;
+    if (admin.terminalAdminPort && items.length) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${admin.terminalAdminPort}/admin/keys`, {
+          headers: { Authorization: req.header("authorization")! },
+          redirect: "error", signal: AbortSignal.timeout(5000),
+        });
+        if (response.ok) {
+          const data = await response.json() as { vault: string; references: typeof references };
+          referencesAvailable = path.resolve(data.vault) === await realpath(keys.directory);
+          if (referencesAvailable) references = data.references;
+        }
+      } catch {
+        // Browsing the key store can continue while the terminal service is recovering.
+      }
+    }
     res.json({
+      referencesAvailable,
       keys: items.map((item) => ({
         ...item,
-        hosts: keyHosts.filter(([, host]) => host.identityKey === item.id).map(([id]) => id),
+        hosts: keyHosts.filter(([, host]) => host.identityKey === item.id ||
+          host.identityFile === path.join(keys.directory, item.id, "identity")).map(([id]) => id),
+        references: Object.hasOwn(references, item.id) ? references[item.id] : [],
       })),
       targets: keyHosts.filter(([, host]) => host.enabled)
         .map(([id, { address, port, user }]) => ({ id, address, port, user })),
@@ -116,7 +130,11 @@ export function createAdminApp(config: Config) {
         ? rules.methods.includes(req.method)
         : rules.records.test(endpoint)
           ? rules.recordMethods.includes(req.method)
-          : rules.actions?.test(endpoint) && req.method === "POST";
+          : (rules.actions.test(endpoint) && req.method === "POST")
+            || (resource === "tokens" && req.method === "PATCH" && /^\/[a-f0-9]{32}\/permissions$/u.test(endpoint))
+            || (resource === "connections" && req.method === "GET" && /^\/[a-f0-9]{32}\/sessions$/u.test(endpoint))
+            || (resource === "connections" && req.method === "POST" &&
+              /^\/[a-f0-9]{32}\/sessions\/[a-f0-9]{32}\/close$/u.test(endpoint));
       if (!allowed) {
         res.status(404).json({ error: "未知的连接管理请求。" });
         return;
@@ -161,8 +179,27 @@ export function createAdminApp(config: Config) {
   app.delete("/api/keys/:id", async (req, res) => {
     const id = keyId.safeParse(req.params.id);
     if (!id.success) throw new KeyError(400, "Invalid key ID.");
-    await removeKey(config, id.data);
-    res.status(204).end();
+    if (!admin.terminalAdminPort) {
+      await removeKey(config, id.data);
+      res.status(204).end();
+      return;
+    }
+    if (Object.values(config.hosts).some((host) => host.identityKey === id.data ||
+      host.identityFile === path.join(keys.directory, id.data, "identity"))) {
+      res.status(409).json({ error: "密钥仍被旧版 SSH 主机配置引用。" });
+      return;
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${admin.terminalAdminPort}/admin/keys/${id.data}/delete`, {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(15000),
+        headers: { Authorization: req.header("authorization")!, "Content-Type": "application/json" },
+        body: JSON.stringify({ vault: keys.directory }),
+      });
+      if (response.ok) res.status(204).end();
+      else res.status(response.status).json(await response.json());
+    } catch {
+      res.status(502).json({ error: "无法校验密钥引用，稍后再试。" });
+    }
   });
   const handleError: ErrorRequestHandler = (error: unknown, _req, res, next) => {
     if (res.headersSent) return next(error);

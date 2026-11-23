@@ -14,7 +14,7 @@ from .errors import ToolError
 from .identity_store import Identities
 from .security import private_file
 
-ADMIN_ROUTES = ("/admin/connections", "/admin/agents", "/admin/tokens")
+ADMIN_ROUTES = ("/admin/connections", "/admin/keys", "/admin/tokens")
 T = TypeVar("T", bound=BaseModel)
 
 

@@ -5,32 +5,23 @@ from pydantic import AfterValidator, AwareDatetime, BaseModel, ConfigDict, Field
 from sqlalchemy import CheckConstraint, ForeignKey, Index, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .config import CredentialRef, Identifier, Principal
-from .models import Base, ProfileInput
+from .config import Identifier
+from .models import Base
 
 Label = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
-Note = Annotated[str, StringConstraints(strip_whitespace=True, max_length=500)]
 Arg = Annotated[str, StringConstraints(max_length=1024)]
 Argv = Annotated[list[Arg], Field(min_length=1, max_length=32)]
 TOKEN_STATES = ("ACTIVE", "REVOKED", "EXPIRED")
+ProfileId = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")]
 
 
-class AgentInput(Principal):
+class TokenPermissions(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: Label
-    description: Note | None = None
-    enabled: bool = True
-    targets: list[Annotated[str, StringConstraints(strip_whitespace=True, max_length=253)]] = Field(
-        default_factory=list, max_length=256,
-    )
-    credentials: set[CredentialRef] = Field(default_factory=set, max_length=256)
+    allowed_profile_ids: set[ProfileId] = Field(default_factory=set, max_length=512)
+    shell: bool = False
+    custom_commands: bool = False
     workspaces: set[Identifier] = Field(default_factory=lambda: {"default"}, max_length=128)
     commands: dict[Identifier, Argv] = Field(default_factory=dict, max_length=128)
-
-    @field_validator("targets")
-    @classmethod
-    def normalize_targets(cls, targets: list[str]) -> list[str]:
-        return list(dict.fromkeys(ProfileInput.valid_host(target) for target in targets))
 
     @field_validator("commands")
     @classmethod
@@ -41,34 +32,33 @@ class AgentInput(Principal):
         return commands
 
     def permissions(self) -> dict:
-        data = self.model_dump(mode="json", exclude={"owner_id", "name", "description", "enabled"})
-        for field in ("credentials", "workspaces"):
-            data[field] = sorted(data[field])
+        data = self.model_dump(mode="json", include={"shell", "custom_commands", "commands", "workspaces"})
+        data["workspaces"] = sorted(data["workspaces"])
         return data
 
 
-class AgentPatch(BaseModel):
+class TokenPermissionPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    name: Label | None = None
-    description: Note | None = None
-    enabled: bool | None = None
-    targets: list[str] | None = None
-    credentials: set[CredentialRef] | None = None
+    allowed_profile_ids: set[ProfileId] | None = None
     workspaces: set[Identifier] | None = None
     shell: bool | None = None
     custom_commands: bool | None = None
     commands: dict[Identifier, Argv] | None = None
-    ssh_agent: bool | None = None
 
 
 def utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-class TokenInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    owner_id: Identifier
+class TokenInput(TokenPermissions):
     name: Label
+    attach_to_token_id: ProfileId | None = None
+    expires_at: Annotated[AwareDatetime, AfterValidator(utc)] | None = None
+    expires_in_days: Annotated[int, Field(ge=1, le=3650)] | None = None
+
+
+class TokenRotation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     expires_at: Annotated[AwareDatetime, AfterValidator(utc)] | None = None
 
 
@@ -86,10 +76,6 @@ class AgentIdentity(Base):
     permissions_json: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[str]
     updated_at: Mapped[str]
-
-    def principal(self) -> Principal:
-        return Principal(owner_id=self.owner_id, **self.permissions_json)
-
 
 class AccessToken(Base):
     __tablename__ = "access_tokens"
@@ -110,3 +96,11 @@ class AccessToken(Base):
     created_by: Mapped[str]
     legacy: Mapped[bool]
     issue_request_id: Mapped[str | None] = mapped_column(String(36), unique=True)
+    permissions_json: Mapped[dict] = mapped_column(JSON, default=dict, server_default="{}")
+
+
+class TokenProfileGrant(Base):
+    __tablename__ = "token_profile_grants"
+    token_id: Mapped[str] = mapped_column(ForeignKey("access_tokens.token_id", ondelete="CASCADE"), primary_key=True)
+    profile_id: Mapped[str] = mapped_column(ForeignKey("profiles.profile_id", ondelete="RESTRICT"), primary_key=True, index=True)
+    profile_access_version: Mapped[int]

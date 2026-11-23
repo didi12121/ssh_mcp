@@ -18,6 +18,9 @@ const tokenFile = path.join(temporary, "admin-token");
 const portFile = path.join(temporary, "port");
 const profile = path.join(temporary, "chrome");
 await writeFile(tokenFile, admin, { mode: 0o600 });
+await writeFile(path.join(temporary, "credentials.json"), JSON.stringify({
+  fixture: { kind: "key", file: path.join(temporary, "fixture-key") },
+}), { mode: 0o600 });
 const script = `
 import socket, sys
 from pathlib import Path
@@ -99,19 +102,21 @@ try {
   await fill("token", admin);
   await evaluate("document.querySelector('#login button').click()");
   await until(() => evaluate("!document.getElementById('sections').hidden"));
-  await click("nav-agents");
-  await until(() => evaluate("!document.getElementById('agents-empty').hidden"));
-  await fill("agent-name", "Browser Agent");
-  await fill("agent-id", "browser_agent");
-  await fill("agent-extra-targets", "example.internal");
-  await evaluate("document.querySelector('#agent-form button[type=submit]').click()");
-  await until(() => evaluate("document.querySelector('#agent-list').textContent.includes('Browser Agent')"));
+  assert.equal(await evaluate("document.querySelector('#sections').children.length"), 3);
+  await click("nav-connections");
+  await until(() => evaluate("!document.getElementById('connection-form').hidden"));
+  await fill("connection-name", "Browser profile");
+  await fill("connection-host", "example.internal");
+  await fill("connection-user", "fixture");
+  await fill("connection-credential", "fixture");
+  await click("connections-save");
+  await until(() => evaluate("document.querySelector('#connection-list').textContent.includes('Browser profile')"));
   await click("nav-tokens");
   await until(() => evaluate("!document.getElementById('tokens-empty').hidden"));
   await click("token-create");
-  await fill("token-owner", "browser_agent");
   await fill("token-name", "Browser token");
-  await evaluate("document.querySelector('#token-form button').click()");
+  await evaluate("document.querySelector('#token-profile-options input').click()");
+  await click("token-submit");
   const first = await until(secretValue);
   assert.ok(first.startsWith("ptmcp_"));
   await call("Browser.grantPermissions", { origin, permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"] });
@@ -126,11 +131,25 @@ try {
   assert.equal(init.status, 200);
   assert.ok((await init.json()).result.serverInfo);
   const tools = await (await mcp(first, "tools/list")).json();
-  assert.equal(tools.result.tools.length, 16);
+  assert.equal(tools.result.tools.length, 11);
   const connections = await (await mcp(first, "tools/call", { name: "connection_list", arguments: {} })).json();
-  assert.equal(connections.result.structuredContent.total, 0);
+  assert.equal(connections.result.structuredContent.connections[0].name, "Browser profile");
+  assert.ok(!Object.hasOwn(connections.result.structuredContent.connections[0], "host"));
+  const openPermissions = () => evaluate("[...document.querySelectorAll('#token-list button')].find(x=>x.textContent==='编辑权限').click()");
+  const listed = async () => (await (await mcp(first, "tools/call", { name: "connection_list", arguments: {} })).json()).result.structuredContent.total;
+  await openPermissions();
+  await evaluate("document.querySelector('#token-profile-options input').click()");
+  await click("token-submit");
+  await until(async () => await listed() === 0);
+  await until(() => evaluate("!document.getElementById('token-dialog').open"));
+  await openPermissions();
+  await evaluate("document.querySelector('#token-profile-options input').click()");
+  await click("token-submit");
+  await until(async () => await listed() === 1);
+  await until(() => evaluate("!document.getElementById('token-dialog').open"));
   await evaluate("window.confirm=()=>true");
   await evaluate("[...document.querySelectorAll('#token-list button')].find(x=>x.textContent==='轮换').click()");
+  await click("token-submit");
   const second = await until(secretValue);
   assert.ok(second !== first);
   assert.equal((await mcp(first, "tools/list")).status, 401);
@@ -141,7 +160,7 @@ try {
   await evaluate("[...document.querySelectorAll('#token-list button')].find(x=>x.textContent==='撤销').click()");
   await until(async () => (await mcp(second, "tools/list")).status === 401);
   assert.ok(!(await listText()).includes(second));
-  console.log("Browser integration passed: Agent creation, one-time Token, clipboard, MCP initialization, rotation and revocation.");
+  console.log("Browser integration passed: global connection, one-time Token, opaque discovery, rotation and revocation.");
 } finally {
   socket?.close();
   for (const processHandle of [browser, terminal]) {

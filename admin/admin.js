@@ -122,7 +122,7 @@ function keyRow(key) {
   const install = element("button", "安装公钥", "quiet");
   install.addEventListener("click", () => openInstall(key));
   const remove = element("button", "移除", "quiet danger");
-  remove.disabled = key.hosts.length > 0;
+  remove.disabled = key.hosts.length > 0 || key.references.length > 0 || !key.referencesAvailable;
   remove.addEventListener("click", () => {
     if (!window.confirm(`移除密钥 ${key.id}？此操作会从密钥库删除该条目。`)) return;
     void action(remove, async () => {
@@ -138,6 +138,9 @@ function keyRow(key) {
     element("div", `${kind} · ${key.algorithm} · ${key.fingerprint}`, "key-info"),
   );
   if (key.hosts.length) row.append(element("div", `已被主机引用：${key.hosts.join("、")}`, "key-info"));
+  if (key.references.length) row.append(element("div",
+    `SSH 连接或终端引用：${key.references.map(({ name }) => name).join("、")}`, "key-info"));
+  if (!key.referencesAvailable) row.append(element("div", "暂时无法核对连接引用。", "key-info"));
   row.append(details, controls);
   return row;
 }
@@ -147,7 +150,7 @@ async function refresh() {
   const { keys } = result;
   targets = result.targets;
   document.querySelector("#empty").hidden = keys.length > 0;
-  list.replaceChildren(...keys.map(keyRow));
+  list.replaceChildren(...keys.map((key) => keyRow({ ...key, referencesAvailable: result.referencesAvailable })));
 }
 
 login.addEventListener("submit", (event) => {

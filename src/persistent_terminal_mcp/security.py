@@ -66,15 +66,11 @@ class Security:
                     result.setdefault(ref, "key")
         return result
 
-    def credential(self, principal: Principal, profile: ProfileInput) -> Credential | None:
-        if profile.host not in principal.targets:
-            raise ToolError("TARGET_FORBIDDEN", "This SSH host is outside the principal's allowed targets.")
+    def credential(self, profile: ProfileInput) -> Credential | None:
         if profile.auth_type == "agent":
-            if not principal.ssh_agent or not self.settings.ssh_agent_path:
-                raise ToolError("CREDENTIAL_FORBIDDEN", "SSH agent authentication is unavailable for this principal.")
+            if not self.settings.ssh_agent_path:
+                raise ToolError("CREDENTIAL_UNAVAILABLE", "Configured SSH agent authentication is unavailable.")
             return None
-        if profile.credential_ref not in principal.credentials:
-            raise ToolError("CREDENTIAL_FORBIDDEN", "Credential reference is unavailable for this principal.")
         try:
             assert profile.credential_ref is not None
             catalog = self.credential_catalog()

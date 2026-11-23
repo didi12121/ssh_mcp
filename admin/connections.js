@@ -1,7 +1,6 @@
 const navKeys = document.querySelector("#nav-keys");
 const navConnections = document.querySelector("#nav-connections");
 const connectionSection = document.querySelector("#connections");
-const connectionOwner = document.querySelector("#connection-owner");
 const connectionForm = document.querySelector("#connection-form");
 const connectionList = document.querySelector("#connection-list");
 const connectionCredential = document.querySelector("#connection-credential");
@@ -9,6 +8,7 @@ const connectionRefresh = document.querySelector("#connections-refresh");
 const connectionPrev = document.querySelector("#connections-prev");
 const connectionNext = document.querySelector("#connections-next");
 let editProfileId = "";
+let editedProfile;
 let connectionPage = 1;
 let connectionLoad = 0;
 
@@ -17,7 +17,6 @@ function resetConnectionSection() {
   document.querySelector("#sections").hidden = true;
   connectionSection.hidden = true;
   connectionList.replaceChildren();
-  connectionOwner.replaceChildren(new Option("管理面板", "dashboard"));
   connectionPage = 1;
   resetConnectionForm();
 }
@@ -25,7 +24,6 @@ function resetConnectionSection() {
 function openManagementSection(section) {
   for (const [id, panel, button] of [
     ["keys", workspace, navKeys], ["connections", connectionSection, navConnections],
-    ["agents", document.querySelector("#agents"), document.querySelector("#nav-agents")],
     ["tokens", document.querySelector("#tokens"), document.querySelector("#nav-tokens")],
   ]) {
     panel.hidden = section !== id;
@@ -33,23 +31,17 @@ function openManagementSection(section) {
   }
   message("");
   if (section === "connections") void action(connectionRefresh, loadConnections);
-  if (section === "agents" || section === "tokens") loadIdentitySection(section);
+  if (section === "tokens") loadIdentitySection();
 }
 
 function connectionRequest(path = "", options, page = connectionPage) {
-  const query = new URLSearchParams({ owner: connectionOwner.value, page: String(page) });
+  const query = new URLSearchParams({ page: String(page) });
   return request(`${path}?${query}`, options, "connections");
-}
-
-function showAgentConnections(ownerId) {
-  connectionOwner.replaceChildren(new Option(ownerId, ownerId));
-  connectionPage = 1;
-  resetConnectionForm();
-  openManagementSection("connections");
 }
 
 function resetConnectionForm() {
   editProfileId = "";
+  editedProfile = undefined;
   connectionForm.reset();
   document.querySelector("#connection-form-title").textContent = "新增连接";
   document.querySelector("#connections-cancel-edit").hidden = true;
@@ -58,6 +50,7 @@ function resetConnectionForm() {
 function editConnection(profile) {
   resetConnectionForm();
   editProfileId = profile.profile_id;
+  editedProfile = profile;
   document.querySelector("#connection-form-title").textContent = "编辑连接";
   document.querySelector("#connections-cancel-edit").hidden = false;
   const fields = connectionForm.elements;
@@ -65,6 +58,7 @@ function editConnection(profile) {
     fields.namedItem(name).value = profile[name] ?? "";
   }
   fields.namedItem("tags").value = profile.tags.join(", ");
+  fields.namedItem("enabled").checked = profile.enabled;
   connectionCredential.value = profile.credential_ref ?? "";
   fields.namedItem("name").focus();
 }
@@ -75,7 +69,7 @@ const connectionErrors = {
   SSH_UNAVAILABLE: "无法连接 SSH，或终端服务无法读取目标主机的 known_hosts。",
   SSH_TIMEOUT: "SSH 连接超时，请检查地址、端口和网络。",
   PROFILE_IN_USE: "此连接仍有终端引用，请关闭相关终端后再删除。",
-  TARGET_FORBIDDEN: "此主机未授权给选中的 Agent。",
+  EXECUTION_ACTIVE: "仍有分离任务运行，结束任务后再清理终端。",
   CREDENTIAL_UNAVAILABLE: "所选凭据不可用，请检查密钥库或服务端凭据配置。",
 };
 
@@ -89,7 +83,7 @@ async function connectionAction(path, options) {
 
 function connectionRow(profile) {
   const row = document.createElement("li");
-  const details = [`${profile.username}@${profile.host} · 端口 ${profile.port}`];
+  const details = [`${profile.username}@${profile.host} · 端口 ${profile.port}`, profile.enabled ? "已启用" : "已禁用"];
   if (profile.credential_ref) details.push(profile.credential_ref);
   if (profile.tags.length) details.push(profile.tags.join("、"));
   row.append(element("div", profile.name, "key-name"), element("div", details.join(" · "), "key-info"));
@@ -102,6 +96,28 @@ function connectionRow(profile) {
   }));
   const edit = element("button", "编辑", "quiet");
   edit.addEventListener("click", () => editConnection(profile));
+  const terminals = element("button", "管理终端", "quiet");
+  const terminalList = element("div", "", "key-info");
+  const loadTerminals = async () => {
+    const { sessions } = await connectionAction(`/${profile.profile_id}/sessions`);
+    terminalList.replaceChildren();
+    if (!sessions.length) terminalList.append(element("p", "没有待清理的终端。"));
+    for (const session of sessions) {
+      const detail = element("div", "", "key-actions");
+      detail.append(element("span", `${session.name} · ${session.workspace_id} · ${session.status}`));
+      const close = element("button", "关闭终端", "quiet danger");
+      close.addEventListener("click", () => {
+        if (!window.confirm(`关闭 ${session.name} 并清理远端终端？`)) return;
+        void action(close, async () => {
+          await connectionAction(`/${profile.profile_id}/sessions/${session.session_id}/close`, { method: "POST" });
+          await loadTerminals();
+        });
+      });
+      detail.append(close);
+      terminalList.append(detail);
+    }
+  };
+  terminals.addEventListener("click", () => action(terminals, loadTerminals));
   const remove = element("button", "删除", "quiet danger");
   remove.addEventListener("click", () => {
     if (!window.confirm(`删除连接 ${profile.name}？`)) return;
@@ -113,8 +129,8 @@ function connectionRow(profile) {
       message("连接已删除。");
     });
   });
-  controls.append(test, edit, remove);
-  row.append(controls);
+  controls.append(test, edit, terminals, remove);
+  row.append(controls, terminalList);
   return row;
 }
 
@@ -123,9 +139,6 @@ async function loadConnections() {
   const selectedCredential = connectionCredential.value;
   const data = await connectionRequest();
   if (load !== connectionLoad || connectionSection.hidden) return;
-  connectionOwner.replaceChildren(...data.owners.map((id) => new Option(id === "dashboard" ? "管理面板" : id, id)));
-  connectionOwner.value = data.owner;
-  document.querySelector("#approved-targets").replaceChildren(...data.allowed_targets.map((host) => new Option(host)));
   const options = data.credentials.map(({ ref, auth_type }) => {
     const label = ref.startsWith("managed_") ? ref.slice("managed_".length) : ref;
     const option = new Option(label, ref);
@@ -153,13 +166,6 @@ async function loadConnections() {
 navKeys.addEventListener("click", () => openManagementSection("keys"));
 navConnections.addEventListener("click", () => openManagementSection("connections"));
 connectionRefresh.addEventListener("click", () => action(connectionRefresh, loadConnections));
-connectionOwner.addEventListener("change", () => {
-  connectionList.replaceChildren();
-  connectionForm.hidden = true;
-  resetConnectionForm();
-  connectionPage = 1;
-  void action(connectionRefresh, loadConnections);
-});
 for (const [button, delta] of [[connectionPrev, -1], [connectionNext, 1]]) {
   button.addEventListener("click", () => {
     connectionPage += delta;
@@ -176,16 +182,20 @@ connectionForm.addEventListener("submit", (event) => {
     ...fields, port: Number(fields.port),
     tags: fields.tags.split(/[,，]/u).map((tag) => tag.trim()).filter(Boolean),
     auth_type: option.dataset.auth, credential_ref: option.value || null,
+    enabled: connectionForm.elements.namedItem("enabled").checked,
   };
   const editing = editProfileId;
+  if (editedProfile && ["host", "port", "username", "auth_type", "credential_ref"].some(
+    (field) => editedProfile[field] !== payload[field],
+  ) && !window.confirm("修改目标或凭据会撤销这条连接的 Token 授权。旧终端将保留供管理员清理。继续？")) return;
   void action(event.submitter, async () => {
-    await connectionAction(editing ? `/${editing}` : "", {
+    const result = await connectionAction(editing ? `/${editing}` : "", {
       method: editing ? "PATCH" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
     resetConnectionForm();
     await loadConnections();
-    message(editing ? "连接已更新。已有终端沿用创建时的配置。" : "连接已保存。");
+    message(result.grants_invalidated ? "连接已更新。请重新授予需要使用新目标的 Token。" : "连接已保存。");
   });
 });

@@ -1,4 +1,5 @@
-from sqlalchemy import event, select, update
+from contextlib import asynccontextmanager
+from sqlalchemy import event, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from .config import Settings
@@ -32,10 +33,16 @@ class Store:
                 Execution.mode == "foreground", Execution.status.in_(["PENDING", "RUNNING"])
             ).values(status="UNKNOWN"))
 
-    async def profile(self, owner: str, profile_id: str) -> Profile:
+    @asynccontextmanager
+    async def write(self):
+        async with self.transaction.begin() as db:
+            await db.execute(text("BEGIN IMMEDIATE"))
+            yield db
+
+    async def profile(self, profile_id: str) -> Profile:
         async with self.transaction() as db:
-            row = await db.scalar(select(Profile).where(Profile.profile_id == profile_id, Profile.owner_id == owner))
-        if row is None:
+            row = await db.get(Profile, profile_id)
+        if row is None or row.deleted_at:
             raise ToolError("PROFILE_NOT_FOUND", "Connection profile not found.")
         return row
 

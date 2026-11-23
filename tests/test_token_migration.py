@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 
@@ -5,10 +6,11 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
-from conftest import LIMITED, TOKEN, call, put_secret
+from conftest import LIMITED, OTHER, TOKEN, call, put_secret
 from test_identities import admin_app, admin_request, mcp_status
 from persistent_terminal_mcp import migrations
 from persistent_terminal_mcp.main import preflight
+from persistent_terminal_mcp.identity_models import AccessToken, AgentIdentity
 from persistent_terminal_mcp.models import Active, Execution, Profile, Session, now
 from persistent_terminal_mcp.storage import Store
 
@@ -35,6 +37,9 @@ def version_one(config):
             execution_id=EXECUTION_ID, session_id=SESSION_ID, mode="detached", status="COMPLETED", exit_code=7,
         ))
         db.execute(Active.__table__.insert().values(owner_id="first", workspace_id="default", session_id=SESSION_ID))
+        for table, column in (("profiles", "enabled"), ("profiles", "access_version"), ("profiles", "deleted_at"),
+                              ("sessions", "profile_access_version")):
+            db.execute(text(f"ALTER TABLE {table} DROP COLUMN {column}"))
     engine.dispose()
 
 
@@ -42,16 +47,16 @@ def test_v1_migration_preserves_owner_and_never_reimports_revoked_token(config):
     version_one(config)
     with admin_app(config) as client:
         assert mcp_status(client, TOKEN) == 200
-        assert call(client, "connection_get", profile_id=PROFILE_ID)["owner_id"] == "first"
+        assert call(client, "connection_list")["connections"][0]["profile_id"] == PROFILE_ID
         assert call(client, "terminal_list")["terminals"][0]["session_id"] == SESSION_ID
         assert call(client, "terminal_status", session_id=SESSION_ID, execution_id=EXECUTION_ID)["exit_code"] == 7
-        limited = admin_request(client, "GET", "agents/limited").json()
+        limited = admin_request(client, "GET", "tokens?owner=limited").json()["tokens"][0]
         assert not limited["shell"] and not limited["custom_commands"] and limited["commands"] == {"uptime": ["uptime"]}
-        assert admin_request(client, "GET", "agents/first").json()["custom_commands"]
         imported = admin_request(client, "GET", "tokens?owner=first").json()["tokens"][0]
-        assert imported["legacy"] and imported["expires_at"] is None
+        assert imported["legacy"] and imported["expires_at"] is None and imported["custom_commands"]
         assert admin_request(client, "POST", f"tokens/{imported['token_id']}/revoke").status_code == 200
-        assert admin_request(client, "PATCH", "agents/limited", {"name": "Updated name"}).status_code == 200
+        assert admin_request(client, "PATCH", f"tokens/{limited['token_id']}/permissions",
+                             {"commands": {"disk": ["df", "-h"]}}).status_code == 200
     [backup] = list((config.data_dir / "migration-backups").glob("*/terminal-v1.db"))
     with sqlite3.connect(backup) as db:
         assert db.execute("SELECT MAX(version) FROM schema_versions").fetchone() == (1,)
@@ -59,7 +64,7 @@ def test_v1_migration_preserves_owner_and_never_reimports_revoked_token(config):
     put_secret(config.principals_file, b"old file is no longer an authentication source")
     with admin_app(config) as client:
         assert mcp_status(client, TOKEN) == 401 and mcp_status(client, LIMITED) == 200
-        assert admin_request(client, "GET", "agents/limited").json()["name"] == "Updated name"
+        assert admin_request(client, "GET", "tokens?owner=limited").json()["tokens"][0]["commands"] == {"disk": ["df", "-h"]}
         assert admin_request(client, "GET", "tokens").json()["total"] == 3
     assert len(list((config.data_dir / "migration-backups").glob("*/terminal-v1.db"))) == 1
 
@@ -102,7 +107,7 @@ async def test_failed_schema_upgrade_rolls_back_ddl_and_existing_rows(config, mo
 def test_unrecognized_schema_is_not_accepted(config):
     version_one(config)
     with sqlite3.connect(config.data_dir / "terminal.db") as db:
-        db.execute("INSERT INTO schema_versions VALUES (3)")
+        db.execute("INSERT INTO schema_versions VALUES (9)")
     with pytest.raises(RuntimeError, match="Unsupported terminal database schema"):
         with admin_app(config):
             pytest.fail("A future schema must not be used")
@@ -116,3 +121,61 @@ async def test_preflight_blocks_update_with_live_foreground_execution(config):
         await preflight(config)
     with sqlite3.connect(config.data_dir / "terminal.db") as db:
         assert db.execute("SELECT MAX(version) FROM schema_versions").fetchone() == (1,)
+
+
+def version_two(config):
+    version_one(config)
+    engine = create_engine(f"sqlite:///{(config.data_dir / 'terminal.db').as_posix()}")
+    _, records = migrations.read_legacy(config.principals_file)
+    agents, tokens = migrations.legacy_rows(records)
+    with engine.begin() as db:
+        for table in (AgentIdentity, AccessToken):
+            table.__table__.create(db)
+        db.execute(AgentIdentity.__table__.insert(), agents)
+        db.execute(AccessToken.__table__.insert(), tokens)
+        db.execute(text("ALTER TABLE access_tokens DROP COLUMN permissions_json"))
+        db.execute(text("INSERT INTO schema_versions VALUES (2)"))
+    engine.dispose()
+
+
+def test_v2_migration_never_expands_old_owner_or_credential_scope(config):
+    version_two(config)
+    across, wrong_key, stale_session, malformed = "d" * 32, "e" * 32, "f" * 32, "2" * 32
+    generated_id = "1" * 32
+    generated = f"ptmcp_{generated_id}_" + "x" * 43
+    with sqlite3.connect(config.data_dir / "terminal.db") as db:
+        db.execute("INSERT INTO profiles(profile_id,owner_id,version,configuration,created_at,updated_at) "
+                   "SELECT ?,'second',version,configuration,created_at,updated_at FROM profiles WHERE profile_id=?",
+                   (across, PROFILE_ID))
+        db.execute("INSERT INTO profiles(profile_id,owner_id,version,configuration,created_at,updated_at) "
+                   "SELECT ?,owner_id,version,json_set(configuration,'$.credential_ref','outside'),created_at,updated_at "
+                   "FROM profiles WHERE profile_id=?", (wrong_key, PROFILE_ID))
+        db.execute("INSERT INTO sessions (session_id, owner_id, workspace_id, profile_id, profile_version, snapshot, name,"
+                   "status, backend, created_at, last_active_at) SELECT ?, owner_id, workspace_id, profile_id, profile_version,"
+                   "json_set(snapshot, '$.port', 2222), name, status, backend, created_at, last_active_at FROM sessions",
+                   (stale_session,))
+        db.execute("UPDATE access_tokens SET revoked_at=? WHERE owner_id='second'", (now(),))
+        db.execute("INSERT INTO profiles(profile_id,owner_id,version,configuration,created_at,updated_at) "
+                   "SELECT ?,'limited',version,configuration,created_at,updated_at FROM profiles WHERE profile_id=?",
+                   (malformed, PROFILE_ID))
+        db.execute("UPDATE agent_identities SET permissions_json=json_set(permissions_json,'$.credentials','fixture') "
+                   "WHERE owner_id='limited'")
+        db.execute("INSERT INTO access_tokens(token_id,owner_id,name,token_hash,created_at,created_by,legacy) "
+                   "VALUES (?,'first','Existing generated token',?,?,'fixture',0)",
+                   (generated_id, hashlib.sha256(generated.encode()).hexdigest(), now()))
+    put_secret(config.principals_file, b"old file must not be parsed when migrating v2")
+    with admin_app(config) as client:
+        assert mcp_status(client, OTHER) == 401
+        assert [row["profile_id"] for row in call(client, "connection_list", generated)["connections"]] == [PROFILE_ID]
+        assert [row["profile_id"] for row in call(client, "connection_list")["connections"]] == [PROFILE_ID]
+        assert call(client, "connection_list", LIMITED)["connections"] == []
+        assert admin_request(client, "GET", "connections").json()["total"] == 4
+        assert [row["session_id"] for row in call(client, "terminal_list")["terminals"]] == [SESSION_ID]
+        assert call(client, "terminal_status", session_id=stale_session)["code"] == "SESSION_NOT_FOUND"
+    report = next((config.data_dir / "migration-backups").glob("*/report.json"))
+    details = json.loads(report.read_text())
+    assert details["from_schema"] == 2 and details["resources"] == {
+        "profiles": 4, "sessions": 2, "executions": 1, "access_tokens": 4,
+    }
+    assert {entry.get("profile_id") for entry in details["denied"]}.issuperset({wrong_key, PROFILE_ID, malformed})
+    assert any(item["reason"] == "legacy_policy_invalid" for item in details["denied"])

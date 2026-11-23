@@ -91,7 +91,7 @@ export function createServer(config: Config, features: ServerFeatures = {}): Mcp
   }, async () => textResult({
     hosts: Object.entries(config.hosts)
       .filter(([, host]) => host.enabled)
-      .map(([id, host]) => ({ id, address: host.address, port: host.port, user: host.user, description: host.description, tags: host.tags })),
+      .map(([id, host]) => ({ id, description: host.description, tags: host.tags })),
   }));
 
   server.registerTool("list_operations", {

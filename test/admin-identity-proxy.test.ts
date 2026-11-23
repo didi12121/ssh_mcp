@@ -49,12 +49,12 @@ operations:
     const base = `http://127.0.0.1:${await listen(server)}`;
     const auth = { Authorization: `Bearer ${admin}` };
     assert.equal((await fetch(`${base}/api/tokens`)).status, 401);
-    assert.equal((await fetch(`${base}/api/agents`, { headers: { ...auth, Origin: "http://invalid.test" } })).status, 403);
+    assert.equal((await fetch(`${base}/api/connections`, { headers: { ...auth, Origin: "http://invalid.test" } })).status, 403);
     assert.equal((await fetch(`${base}/api/tokens/00000000000000000000000000000000/other`,
       { headers: auth, method: "POST" })).status, 404);
-    const agents = await fetch(`${base}/api/agents?catalog=1&token=not-forwarded&target=https://example.com`, { headers: auth });
-    assert.equal(agents.status, 200);
-    assert.equal(agents.headers.get("cache-control"), "no-store");
+    const tokens = await fetch(`${base}/api/tokens?catalog=1&token=not-forwarded&target=https://example.com`, { headers: auth });
+    assert.equal(tokens.status, 200);
+    assert.equal(tokens.headers.get("cache-control"), "no-store");
     const create = await fetch(`${base}/api/tokens`, {
       method: "POST", body: JSON.stringify({ owner_id: "test", name: "client" }),
       headers: { ...auth, "Idempotency-Key": requestId, "Content-Type": "application/json" },
@@ -62,7 +62,7 @@ operations:
     assert.equal(create.status, 429);
     assert.equal(create.headers.get("retry-after"), "7");
     assert.deepEqual(called, [
-      { url: "/admin/agents?catalog=1", idempotency: undefined },
+      { url: "/admin/tokens?catalog=1", idempotency: undefined },
       { url: "/admin/tokens", idempotency: requestId },
     ]);
   } finally {

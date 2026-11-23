@@ -15,6 +15,7 @@ from .backends import Remote
 from .config import Principal, Settings
 from .errors import ToolError
 from .models import Active, Execution, Profile, ProfileInput, Session, now
+from .profiles import usable
 from .ring import OutputRing
 from .security import Security, audit
 from .ssh import SSHConnection, SSHConnectionManager
@@ -156,20 +157,25 @@ class Sessions:
                 raise ToolError("NO_ACTIVE_TERMINAL", "No active terminal in this workspace.")
             session_id = current.session_id
         row = await self.store.session(agent.owner_id, session_id)
-        self.security.workspace(agent, row.workspace_id)
-        self.security.credential(agent, ProfileInput.model_validate(row.snapshot))
+        async with self.store.transaction() as db:
+            profile = await db.get(Profile, row.profile_id)
+        if row.workspace_id not in agent.workspaces or not usable(profile, agent, row):
+            raise ToolError("SESSION_NOT_FOUND", "Terminal session not found.")
+        self.security.credential(ProfileInput.model_validate(row.snapshot))
         return row
 
     async def create(
         self, agent: Principal, profile_id: str, name: str, workspace_id: str,
     ) -> dict:
         self.security.workspace(agent, workspace_id)
-        async with self.mutations, self.store.transaction.begin() as db:
-            profile = await self.store.profile(agent.owner_id, profile_id)
-            self.security.credential(agent, ProfileInput.model_validate(profile.configuration))
+        async with self.mutations, self.store.write() as db:
+            profile = await db.get(Profile, profile_id)
+            if not usable(profile, agent) or profile is None:
+                raise ToolError("PROFILE_NOT_FOUND", "Connection profile not found.")
+            self.security.credential(ProfileInput.model_validate(profile.configuration))
             row = await db.scalar(select(Session).where(
                 Session.owner_id == agent.owner_id, Session.workspace_id == workspace_id,
-                Session.profile_id == profile_id, Session.profile_version == profile.version,
+                Session.profile_id == profile_id, Session.profile_access_version == profile.access_version,
                 Session.name == name, Session.status != "CLOSED",
             ).order_by(Session.created_at.desc()).limit(1))
             reused = row is not None
@@ -180,7 +186,8 @@ class Sessions:
                     raise ToolError("SESSION_LIMIT", "Terminal limit reached. Close a terminal first.")
                 row = Session(
                     session_id=uuid4().hex, owner_id=agent.owner_id, workspace_id=workspace_id,
-                    profile_id=profile_id, profile_version=profile.version, snapshot=profile.configuration,
+                    profile_id=profile_id, profile_version=profile.version, profile_access_version=profile.access_version,
+                    snapshot=profile.configuration,
                     name=name, status="CREATING", backend="pending",
                 )
                 db.add(row)
@@ -193,6 +200,7 @@ class Sessions:
     async def activate(self, agent: Principal, row: Session, connect: bool = True) -> dict:
         if connect:
             await self.connect(agent, row)
+        await self.owned(agent, row.session_id)
         async with self.mutations, self.store.transaction.begin() as db:
             current = await db.get(Session, row.session_id)
             if not current or current.status not in {"READY", "BUSY"}:
@@ -206,9 +214,9 @@ class Sessions:
             return await self.connect_locked(agent, row, runtime, for_close=for_close)
 
     async def connect_locked(
-        self, agent: Principal, row: Session, runtime: Runtime, *, for_close: bool = False,
+        self, agent: Principal, row: Session, runtime: Runtime, *, for_close: bool = False, admin: bool = False,
     ) -> Runtime:
-        row = await self.owned(agent, row.session_id)
+        row = await self.store.session(agent.owner_id, row.session_id) if admin else await self.owned(agent, row.session_id)
         if row.status == "CLOSED":
             raise ToolError("TERMINAL_CLOSED", "This terminal has been closed.")
         if row.backend == "tmux_lost" and not for_close:
@@ -239,7 +247,7 @@ class Sessions:
                 for attempt in range(self.settings.reconnect_attempts):
                     runtime.attempts += 1
                     try:
-                        runtime.ssh = await self.ssh.connect(agent, ProfileInput.model_validate(row.snapshot))
+                        runtime.ssh = await self.ssh.connect(ProfileInput.model_validate(row.snapshot))
                         runtime.monitor = asyncio.create_task(
                             self.watch_disconnect(row.session_id, runtime, runtime.ssh)
                         )
@@ -329,10 +337,10 @@ class Sessions:
             runtime.shell.change_terminal_size(columns, lines)
         return {"session_id": row.session_id, "columns": columns, "lines": lines}
 
-    async def close(self, agent: Principal, row: Session, preserve: bool) -> dict:
+    async def close(self, agent: Principal, row: Session, preserve: bool, *, admin: bool = False) -> dict:
         runtime = self.runtimes.setdefault(row.session_id, Runtime())
         async with runtime.lock:
-            row = await self.owned(agent, row.session_id)
+            row = await self.store.session(agent.owner_id, row.session_id) if admin else await self.owned(agent, row.session_id)
             if row.status == "CLOSED":
                 return {"session_id": row.session_id, "status": "CLOSED"}
             async with self.store.transaction() as db:
@@ -341,7 +349,7 @@ class Sessions:
                     Execution.status.in_(["PENDING", "RUNNING", "UNKNOWN"]),
                 ))).all()
             if not preserve and (row.tmux_session_name or detached):
-                await self.connect_locked(agent, row, runtime, for_close=True)
+                await self.connect_locked(agent, row, runtime, for_close=True, admin=admin)
                 assert runtime.ssh is not None
                 ssh = runtime.ssh.connection
                 for item in detached:
@@ -392,9 +400,13 @@ class Sessions:
             rows = (await db.scalars(select(Session).where(Session.owner_id == agent.owner_id)
                                      .order_by(Session.last_active_at.desc()))).all()
             active = (await db.scalars(select(Active.session_id).where(Active.owner_id == agent.owner_id))).all()
+            permitted = {profile.profile_id: profile for profile in (await db.scalars(
+                select(Profile).where(Profile.profile_id.in_(agent.profile_grants))
+            )).all()} if agent.profile_grants else {}
         results = []
         for row in rows:
-            if row.workspace_id not in agent.workspaces or (profile_id and row.profile_id != profile_id):
+            if (row.workspace_id not in agent.workspaces or (profile_id and row.profile_id != profile_id)
+                    or not usable(permitted.get(row.profile_id), agent, row)):
                 continue
             if (workspace_id and row.workspace_id != workspace_id) or name.casefold() not in row.name.casefold():
                 continue

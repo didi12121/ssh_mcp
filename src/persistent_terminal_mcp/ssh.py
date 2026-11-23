@@ -6,7 +6,7 @@ from typing import Any
 
 import asyncssh
 
-from .config import Principal, Settings
+from .config import Settings
 from .errors import ToolError
 from .models import ProfileInput
 from .security import Security
@@ -30,8 +30,8 @@ class SSHConnectionManager:
         self.settings = settings
         self.security = security
 
-    async def connect(self, agent: Principal, profile: ProfileInput) -> SSHConnection:
-        credential = self.security.credential(agent, profile)
+    async def connect(self, profile: ProfileInput) -> SSHConnection:
+        credential = self.security.credential(profile)
         resources = AsyncExitStack()
         try:
             options: dict[str, Any]
