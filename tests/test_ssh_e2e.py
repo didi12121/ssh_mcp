@@ -98,7 +98,9 @@ def test_real_tmux_channels_restart_and_detached(config, sshd):
         handed_off = call(client, "terminal_exec", session_id=session,
                           command="printf start; sleep 4; printf end; exit 9", execution_mode="detached",
                           yield_time_ms=100)
-        assert handed_off["status"] == "RUNNING", handed_off
+        assert handed_off["status"] in {"PENDING", "RUNNING"}, handed_off
+        until(lambda: call(client, "terminal_status", session_id=session,
+                           execution_id=handed_off["execution_id"])["status"] == "RUNNING")
         unconfirmed = call(client, "terminal_exec", session_id=session,
                            command="echo once >> /tmp/foreground-count; sleep 9", yield_time_ms=120)
         assert unconfirmed["status"] == "RUNNING"
@@ -188,3 +190,21 @@ def test_pty_fallback_deadlines_and_output_limits(config, sshd):
         assert not any("�" in entry["text"] for entry in page["entries"])
         assert call(client, "terminal_close", session_id=session, preserve_remote=True)["status"] == "CLOSED"
         assert call(client, "terminal_status", session_id=session, reconnect=True)["code"] == "TERMINAL_CLOSED"
+
+
+def test_web_connection_probe_uses_real_ssh(config, sshd):
+    _, port = sshd
+    token = "f" * 64
+    config.web_admin_token_file = config.data_dir / "admin-token"
+    put_secret(config.web_admin_token_file, token.encode())
+    headers = {"Authorization": "Bearer " + token}
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("127.0.0.1", 51001)) as client:
+        created = client.post("/admin/connections", headers=headers, json={
+            "name": "SSH probe", "host": "127.0.0.1", "port": port,
+            "username": "fixture", "credential_ref": "fixture",
+        })
+        assert created.status_code == 201
+        url = "/admin/connections/" + created.json()["profile_id"]
+        probe = client.post(url + "/test", headers=headers)
+        assert probe.status_code == 200 and probe.json()["tmux_available"]
+        assert client.delete(url, headers=headers).status_code == 200

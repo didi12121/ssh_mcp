@@ -38,6 +38,8 @@ button:disabled { cursor: wait; opacity: .65; }
 .mode-switch { display: flex; gap: 4px; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
 .mode-switch button { background: transparent; color: var(--muted); }
 .mode-switch button[aria-pressed="true"] { color: var(--accent); background: #193437; }
+.section-nav { margin-bottom: 20px; }
+.owner-label { display: block; margin: 12px 0 5px; font-weight: 600; }
 .danger { color: #ffafa7; }
 .muted, .empty { color: var(--muted); }
 .file-label, #key-file { font-size: .87rem; }

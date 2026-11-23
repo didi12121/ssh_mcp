@@ -3,9 +3,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>密钥管理 · SSH MCP</title>
+  <title>服务器管理 · SSH MCP</title>
   <link rel="stylesheet" href="/admin.css">
   <script src="/admin.js" defer></script>
+  <script src="/connections.js" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -14,13 +15,17 @@
     </div>
   </header>
   <main class="shell">
-    <h1>SSH 密钥管理</h1>
+    <h1>SSH 管理</h1>
     <form id="login" class="panel login">
       <label for="token">管理员令牌</label>
-      <p class="muted">使用服务器上的管理令牌解锁密钥库。</p>
+      <p class="muted">使用服务器上的管理令牌登录。</p>
       <input id="token" type="password" autocomplete="off" required>
       <button type="submit">解锁</button>
     </form>
+    <nav id="sections" class="mode-switch section-nav" aria-label="管理功能" hidden>
+      <button type="button" id="nav-keys" aria-controls="workspace" aria-pressed="true">密钥库</button>
+      <button type="button" id="nav-connections" aria-controls="connections" aria-pressed="false">SSH 连接</button>
+    </nav>
     <div id="workspace" class="workspace" hidden>
       <section class="panel inventory" aria-labelledby="inventory-title">
         <div class="section-title">
@@ -66,6 +71,51 @@
         <button type="submit">导入</button>
         </form>
       </section>
+    </div>
+    <div id="connections" class="workspace" hidden>
+      <section class="panel" aria-labelledby="connection-list-title">
+        <div class="section-title">
+          <h2 id="connection-list-title">SSH 连接</h2>
+          <button id="connections-refresh" type="button" class="quiet">刷新</button>
+        </div>
+        <label for="connection-owner" class="owner-label">所属身份</label>
+        <select id="connection-owner"><option value="dashboard">管理面板</option></select>
+        <p id="connections-empty" class="empty" hidden>此身份下还没有连接。</p>
+        <ul id="connection-list" class="key-list"></ul>
+        <div id="connection-pages" class="key-actions" hidden>
+          <button id="connections-prev" type="button" class="quiet">上一页</button>
+          <button id="connections-next" type="button" class="quiet">下一页</button>
+        </div>
+      </section>
+      <form id="connection-form" class="panel" hidden>
+        <h2 id="connection-form-title">新增连接</h2>
+        <label for="connection-name">连接名称</label>
+        <input id="connection-name" name="name" required maxlength="100">
+        <label for="connection-host">SSH 地址</label>
+        <input id="connection-host" name="host" list="approved-targets" required maxlength="253" placeholder="主机名或 IP">
+        <datalist id="approved-targets"></datalist>
+        <div class="target-fields">
+          <div>
+            <label for="connection-user">SSH 用户</label>
+            <input id="connection-user" name="username" required maxlength="64">
+          </div>
+          <div>
+            <label for="connection-port">端口</label>
+            <input id="connection-port" name="port" type="number" required min="1" max="65535" value="22">
+          </div>
+        </div>
+        <label for="connection-credential">认证凭据</label>
+        <select id="connection-credential" required></select>
+        <p id="connection-no-credentials" class="muted" hidden>请先在密钥库生成或导入私钥，或为此 Agent 授权凭据。</p>
+        <label for="connection-description">备注</label>
+        <input id="connection-description" name="description" maxlength="500">
+        <label for="connection-tags">标签 <span class="muted">逗号分隔</span></label>
+        <input id="connection-tags" name="tags" maxlength="512">
+        <div class="key-actions">
+          <button id="connections-save" type="submit">保存连接</button>
+          <button id="connections-cancel-edit" type="button" class="quiet" hidden>取消编辑</button>
+        </div>
+      </form>
     </div>
     <p id="status" role="status" aria-live="polite"></p>
   </main>

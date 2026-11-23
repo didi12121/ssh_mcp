@@ -46,6 +46,7 @@ export function createAdminApp(config: Config) {
   app.get("/", (_req, res) => res.sendFile(fileURLToPath(new URL("index.html", assets))));
   app.get("/admin.css", (_req, res) => res.sendFile(fileURLToPath(new URL("admin.css", assets))));
   app.get("/admin.js", (_req, res) => res.sendFile(fileURLToPath(new URL("admin.js", assets))));
+  app.get("/connections.js", (_req, res) => res.sendFile(fileURLToPath(new URL("connections.js", assets))));
 
   app.use("/api", async (req, res, next) => {
     const supplied = req.header("authorization")?.match(/^Bearer ([a-f0-9]{64})$/u)?.[1];
@@ -79,6 +80,38 @@ export function createAdminApp(config: Config) {
     res.status(201).json(await importKey(keys, input.data));
   });
   const smallJson = express.json({ limit: "4kb", inflate: false });
+  app.use("/api/connections", smallJson, async (req, res) => {
+    if (!admin.terminalAdminPort) {
+      res.status(503).json({ error: "尚未配置终端服务的管理接口。" });
+      return;
+    }
+    const endpoint = req.path === "/" ? "" : req.path;
+    const allowed = endpoint === ""
+      ? ["GET", "POST"].includes(req.method)
+      : /^\/[a-f0-9]{32}$/u.test(endpoint)
+        ? ["PATCH", "DELETE"].includes(req.method)
+        : /^\/[a-f0-9]{32}\/test$/u.test(endpoint) && req.method === "POST";
+    if (!allowed) {
+      res.status(404).json({ error: "未知的连接管理请求。" });
+      return;
+    }
+    const url = new URL(`http://127.0.0.1:${admin.terminalAdminPort}/admin/connections${endpoint}`);
+    for (const field of ["owner", "page"]) {
+      if (typeof req.query[field] === "string") url.searchParams.set(field, req.query[field]);
+    }
+    try {
+      const response = await fetch(url, {
+        method: req.method,
+        headers: { Authorization: req.header("authorization")!, "Content-Type": "application/json" },
+        ...(req.body === undefined ? {} : { body: JSON.stringify(req.body) }),
+        redirect: "error",
+        signal: AbortSignal.timeout(75000),
+      });
+      res.status(response.status).json(await response.json());
+    } catch {
+      res.status(502).json({ error: "终端服务管理接口暂不可用。" });
+    }
+  });
   app.post("/api/keys/generate", smallJson, async (req, res) => {
     const input = keyGenerationInput.safeParse(req.body);
     if (!input.success) throw new KeyError(400, "Invalid key ID, label or algorithm.");

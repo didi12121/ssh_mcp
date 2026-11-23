@@ -58,6 +58,10 @@ uv run --locked terminal-mcp encrypt .data/terminal/master.key .data/terminal/we
 
 ### MCP 工作流程
 
+在 SSH 管理页的「SSH 连接」中可新增、编辑、测试和删除连接。先在 TypeScript 的 `admin` 配置中设置 `terminalAdminPort: 8766`，再在 Python 服务的 `.env` 设置 `PTMCP_WEB_ADMIN_TOKEN_FILE` 和 `PTMCP_MANAGED_KEYS_DIR`，分别指向页面的管理员令牌文件和 SSH 密钥库。两个服务需在同一主机运行，并能读取各自配置所引用的文件。
+
+选择「管理面板」可使用密钥库中的私钥。若要让某个 Agent 在 MCP 中发现和使用连接，请在新增时选择对应的 Agent 身份，该身份须已获目标和凭据授权。授权密钥库中的私钥时使用 `managed_密钥ID`。网页测试会校验终端服务的 `known_hosts`。
+
 | 操作 | 工具与参数 |
 |---|---|
 | 添加与检查连接 | `connection_create` 传 `name`、`host`、`port`、`username`、`auth_type`、`credential_ref` 和可选 `tags`。再以返回的 `profile_id` 调用 `connection_test` |

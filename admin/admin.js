@@ -36,13 +36,14 @@ function lock() {
   list.replaceChildren();
   login.hidden = false;
   workspace.hidden = true;
+  resetConnectionSection();
   logout.hidden = true;
   tokenField.focus();
 }
 
-async function request(path, options) {
+async function request(path, options, api = "keys") {
   const sentToken = token;
-  const response = await fetch(`/api/keys${path}`, {
+  const response = await fetch(`/api/${api}${path}`, {
     ...options,
     headers: { Authorization: `Bearer ${token}`, ...options?.headers },
   });
@@ -53,7 +54,7 @@ async function request(path, options) {
   }
   if (response.status === 204) return;
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error ?? "请求失败。");
+  if (!response.ok) throw Object.assign(new Error(payload.error ?? "请求失败。"), { code: payload.code });
   return payload;
 }
 
@@ -155,7 +156,8 @@ login.addEventListener("submit", (event) => {
   void action(event.submitter, async () => {
     await refresh();
     login.hidden = true;
-    workspace.hidden = false;
+    openManagementSection("keys");
+    document.querySelector("#sections").hidden = false;
     logout.hidden = false;
     document.querySelector(generateForm.hidden ? "#key-id" : "#generate-id").focus();
   });

@@ -8,7 +8,7 @@ from starlette.testclient import TestClient
 from persistent_terminal_mcp.models import ProfileInput
 from persistent_terminal_mcp.ring import OutputRing
 from persistent_terminal_mcp.server import build_app
-from conftest import OTHER, TOKEN, call, profile
+from conftest import OTHER, TOKEN, call, profile, put_secret
 
 
 def test_health_and_authentication(config):
@@ -101,3 +101,41 @@ def test_ssh_handshake_deadline(config):
             release.set()
             server.shutdown()
             thread.join(timeout=2)
+
+
+def test_web_admin_shares_agent_profiles_and_validates_credentials(config):
+    token = "a" * 64
+    headers = {"Authorization": "Bearer " + token}
+    config.web_admin_token_file = config.data_dir / "admin-token"
+    put_secret(config.web_admin_token_file, token.encode())
+    config.managed_keys_dir = config.data_dir / "managed"
+    key = config.managed_keys_dir / "web_backup" / "identity"
+    key.parent.mkdir(parents=True)
+    put_secret(key, (config.data_dir / "identity").read_bytes())
+    url = "/admin/connections"
+    data = {"name": "Dashboard", "host": "127.0.0.1", "username": "fixture",
+            "auth_type": "key", "credential_ref": "managed_web_backup"}
+    app = build_app(config)
+    with TestClient(app, base_url="http://127.0.0.1", client=("127.0.0.1", 51000)) as client:
+        assert client.get(url).status_code == 403
+        assert client.get(url, headers={"Authorization": "Bearer " + TOKEN}).status_code == 403
+        assert client.get(url, headers={**headers, "Origin": "http://evil.example"}).status_code == 403
+        assert client.get(url, headers={**headers, "Host": "other.example"}).status_code == 403
+        assert client.post("/mcp", headers=headers, json={}).status_code == 401
+        created = client.post(url, headers=headers, json=data)
+        assert created.status_code == 201, created.text
+        dashboard_id = created.json()["profile_id"]
+        assert client.get(url, headers=headers).json()["profiles"][0]["profile_id"] == dashboard_id
+        assert call(client, "connection_list")["total"] == 0
+        assert client.post(url + "?owner=first", headers=headers, json=data).json()["code"] == "CREDENTIAL_FORBIDDEN"
+        shared = client.post(url + "?owner=first", headers=headers, json={**data, "credential_ref": "fixture"})
+        assert shared.status_code == 201
+        shared_id = shared.json()["profile_id"]
+        assert call(client, "connection_get", profile_id=shared_id)["name"] == "Dashboard"
+        patched = client.patch(url + "/" + shared_id + "?owner=first", headers=headers, json={"name": "Shared"})
+        assert patched.json()["version"] == 2
+        assert call(client, "connection_get", profile_id=shared_id)["name"] == "Shared"
+        assert client.delete(url + "/" + shared_id + "?owner=first", headers=headers).json()["deleted"]
+        assert client.delete(url + "/" + dashboard_id, headers=headers).json()["deleted"]
+    with TestClient(build_app(config), base_url="http://127.0.0.1", client=("192.0.2.10", 51000)) as client:
+        assert client.get(url, headers=headers).status_code == 403

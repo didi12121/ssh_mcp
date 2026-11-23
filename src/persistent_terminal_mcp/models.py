@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from sqlalchemy import ForeignKey, JSON, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
-from .config import Identifier, Port
+from .config import CredentialRef, Port
 
 
 def now() -> str:
@@ -22,7 +22,7 @@ class ProfileInput(BaseModel):
     port: Port = 22
     username: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9._-]{0,63}$")
     auth_type: Literal["key", "agent", "password"] = "key"
-    credential_ref: Identifier | None = None
+    credential_ref: CredentialRef | None = None
     tags: list[str] = Field(default_factory=list, max_length=32)
 
     @field_validator("host")
@@ -58,7 +58,7 @@ class ProfilePatch(BaseModel):
     port: Port | None = None
     username: str | None = None
     auth_type: Literal["key", "agent", "password"] | None = None
-    credential_ref: Identifier | None = None
+    credential_ref: CredentialRef | None = None
     tags: list[str] | None = None
 
 

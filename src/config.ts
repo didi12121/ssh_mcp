@@ -56,6 +56,7 @@ const configSchema = z.object({
   admin: z.object({
     port: z.number().int().min(1).max(65535).default(8788),
     tokenFile: z.string().min(1).default(".data/admin-token"),
+    terminalAdminPort: z.number().int().min(1).max(65535).optional(),
   }).strict().optional(),
   http: z.object({
     host: z.string().min(1).default("127.0.0.1"),

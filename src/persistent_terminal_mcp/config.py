@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, StringConstraints
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Identifier = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")]
+CredentialRef = Annotated[str, StringConstraints(pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,79}$")]
 Port = Annotated[int, Field(ge=1, le=65535)]
 Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
 
@@ -13,7 +14,7 @@ class Principal(BaseModel):
     owner_id: Identifier
     token_sha256: Digest
     targets: list[str] = Field(min_length=1)  # Exact hostnames/IP addresses.
-    credentials: set[Identifier] = Field(default_factory=set)
+    credentials: set[CredentialRef] = Field(default_factory=set)
     workspaces: set[Identifier] = Field(default_factory=lambda: {"default"})
     shell: bool = False
     commands: dict[Identifier, list[str]] = Field(default_factory=dict)
@@ -37,6 +38,8 @@ class Settings(BaseSettings):
     principals_file: Path = Path(".data/terminal/principals.json")
     credentials_file: Path = Path(".data/terminal/credentials.json")
     master_key_file: Path | None = None
+    web_admin_token_file: Path | None = None
+    managed_keys_dir: Path | None = None
     ssh_agent_path: str | None = None
     connect_timeout: float = Field(default=15, gt=0, le=60)
     keepalive_interval: int = Field(default=30, ge=1)

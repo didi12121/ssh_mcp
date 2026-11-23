@@ -18,6 +18,7 @@ audit:
 # admin:
 #   port: 8788
 #   tokenFile: .data/admin-token
+#   terminalAdminPort: 8766
 
 # Required only for the intranet Streamable HTTP server.
 http:

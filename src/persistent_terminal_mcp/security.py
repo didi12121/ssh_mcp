@@ -15,6 +15,8 @@ from .models import ProfileInput
 
 principals_schema = TypeAdapter(list[Principal])
 credentials_schema = TypeAdapter(dict[Identifier, Credential])
+credential_id = TypeAdapter(Identifier)
+MANAGED_PREFIX = "managed_"
 audit_log = logging.getLogger("terminal.audit")
 
 
@@ -33,12 +35,37 @@ class Security:
         if len(token) < 32 or len(token) > 256:
             return None
         try:
-            principals = principals_schema.validate_json(private_file(self.settings.principals_file))
+            principals = self.principals()
         except (ValueError, OSError):
             return None
         digest = hashlib.sha256(token.encode()).hexdigest()
         matches = [principal for principal in principals if hmac.compare_digest(digest, principal.token_sha256)]
         return matches[0] if len(matches) == 1 else None
+
+    def principals(self) -> list[Principal]:
+        try:
+            return principals_schema.validate_json(private_file(self.settings.principals_file))
+        except FileNotFoundError:
+            return []
+
+    def credential_catalog(self) -> dict[str, Credential]:
+        try:
+            return credentials_schema.validate_json(private_file(self.settings.credentials_file))
+        except FileNotFoundError:
+            return {}
+
+    def managed_key(self, reference: str) -> Credential | None:
+        directory = self.settings.managed_keys_dir
+        if directory is None or not reference.startswith(MANAGED_PREFIX):
+            return None
+        try:
+            key_id = credential_id.validate_python(reference.removeprefix(MANAGED_PREFIX))
+        except ValueError:
+            return None
+        key = directory / key_id / "identity"
+        if key.is_file():
+            return Credential(kind="key", file=key)
+        return None
 
     def credential(self, principal: Principal, profile: ProfileInput) -> Credential | None:
         if profile.host not in principal.targets:
@@ -50,8 +77,11 @@ class Security:
         if profile.credential_ref not in principal.credentials:
             raise ToolError("CREDENTIAL_FORBIDDEN", "Credential reference is unavailable for this principal.")
         try:
-            credentials = credentials_schema.validate_json(private_file(self.settings.credentials_file))
-            credential = credentials[profile.credential_ref]
+            assert profile.credential_ref is not None
+            catalog = self.credential_catalog()
+            credential = catalog.get(profile.credential_ref) or self.managed_key(profile.credential_ref)
+            if credential is None:
+                raise KeyError(profile.credential_ref)
             if (profile.auth_type == "password") != (credential.kind == "password"):
                 raise ValueError("credential kind mismatch")
             return credential

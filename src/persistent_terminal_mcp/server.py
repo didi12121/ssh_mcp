@@ -18,7 +18,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .config import Identifier, Port, Principal, Settings
+from .config import CredentialRef, Identifier, Port, Principal, Settings
 from .errors import ToolError
 from .executions import Executions
 from .models import ProfileInput, ProfilePatch
@@ -27,6 +27,7 @@ from .security import Security, audit
 from .sessions import Sessions
 from .ssh import SSHConnectionManager
 from .storage import Store
+from .web_connections import ROUTE as CONNECTION_ADMIN_ROUTE, register_connection_routes
 
 owner: ContextVar[Principal] = ContextVar("ptmcp_principal")
 ResourceId = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{32}$")]
@@ -42,7 +43,7 @@ class RequireBearer:
         self.security = security
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["path"] == "/health":
+        if scope["type"] != "http" or scope["path"] in {"/health", CONNECTION_ADMIN_ROUTE} or scope["path"].startswith(CONNECTION_ADMIN_ROUTE + "/"):
             await self.app(scope, receive, send)
             return
         request = Request(scope)
@@ -127,7 +128,7 @@ def build_app(settings: Settings, approve: Approval | None = None) -> ASGIApp:
     @tool("Save an SSH connection profile using a credential reference already granted to your identity.")
     async def connection_create(
         name: Name, host: Query, username: Annotated[str, StringConstraints(max_length=64)], port: Port = 22,
-        auth_type: Literal["key", "agent", "password"] = "key", credential_ref: Identifier | None = None,
+        auth_type: Literal["key", "agent", "password"] = "key", credential_ref: CredentialRef | None = None,
         description: Annotated[str, StringConstraints(max_length=500)] | None = None,
         tags: Annotated[list[str], Field(max_length=32)] | None = None,
     ) -> CallToolResult:
@@ -264,6 +265,7 @@ def build_app(settings: Settings, approve: Approval | None = None) -> ASGIApp:
             await connection.execute(text("SELECT 1"))
         return JSONResponse({"ok": True, "service": "persistent-terminal-mcp"})
 
+    register_connection_routes(mcp, profiles, security)
     app = mcp.streamable_http_app()
     sdk_lifespan = app.router.lifespan_context
 
