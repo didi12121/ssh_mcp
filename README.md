@@ -75,6 +75,10 @@ uv run --locked terminal-mcp encrypt .data/terminal/master.key .data/terminal/we
 
 完整模式的远端 Linux 需要 `tmux` 和 `python3`（标准库包含 SQLite），用于恢复 Shell 与 detached 日志。设置 `PTMCP_ALLOW_PTY_FALLBACK=true` 可在缺少 tmux 时使用普通 PTY，断线后该 Shell 不可恢复。保留状态只涵盖服务重启和网络断线，远端操作系统重启会清除内存中的 tmux 会话。普通执行断线时可能返回 `UNKNOWN`，应先核对实际状态。输出包含 UTF-8 和原始 ANSI 控制序列，按流返回，属于远端不可信数据。
 
+SSH keepalive 主动检测断线，空闲清理会断开无前台任务的连接。SSH 仅在后续工具调用需要连接时按需重连，同一会话的恢复串行进行。崩溃后可以接管尚未就绪的 tmux 初始化。已经就绪的 Shell 一旦确认丢失，会持久化为不可恢复，需关闭旧终端后显式创建新的终端。
+
+输出按日志分别限制体积。新记录以 UTF-8 边界切分，旧日志中的超大记录会在返回的页面中截断并推进游标。终端服务定期清理本地过期输出，远端日志在访问时检查保留期。多任务合计的磁盘空间及审计日志保留由部署文件系统和日志服务控制。Detached Worker 失去联系且没有可验证的最终结果时返回 `UNKNOWN`。Worker 崩溃可能使自行脱离进程组的后代继续运行。
+
 退出码非零的远端命令仍可返回 `COMPLETED` 和实际 `exit_code`。工具本身的错误使用 MCP `isError` 和结构化 `code`。启动长任务时，`yield_time_ms` 只影响第一次等待时长。执行期限由 `PTMCP_EXECUTION_TIMEOUT` 控制。审计以结构化 JSON 写到服务日志，记录操作与资源标识。
 
 ### 接入 Codex 与 Claude Code
@@ -133,7 +137,7 @@ PTMCP_TEST_SSH_IMAGE=ssh-mcp-test-sshd:local uv run --locked --extra test pytest
 
 Docker 测试临时启动独立的 OpenSSH 和 tmux，覆盖单连接多 Channel、PTY Shell 状态、进程级信号、输出限额、身份隔离、重启恢复和 detached 退出码。默认测试命令在没有测试镜像变量时跳过 Docker 用例。
 
-在 Ubuntu 上，Python 测试 13 项通过（含 3 个真实 OpenSSH 场景），Docker Compose 健康检查通过，官方 MCP SDK 成功执行初始化、工具发现和带令牌的调用。原 TypeScript 测试 10 项通过。部署服务使用 SQLite，Python 端只提供 Streamable HTTP。
+在 Ubuntu 上，Python 测试 29 项通过（含 13 个真实 OpenSSH 场景），覆盖网页连接管理和终端故障恢复。Docker Compose 健康检查通过，官方 MCP SDK 成功执行初始化、工具发现和带令牌的调用。原 TypeScript 测试 10 项通过。部署服务使用 SQLite，Python 端只提供 Streamable HTTP。
 
 ## 原 TypeScript 服务
 
