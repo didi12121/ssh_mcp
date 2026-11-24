@@ -1,6 +1,8 @@
-import { timingSafeEqual } from "node:crypto";
+import { timingSafeEqual, X509Certificate } from "node:crypto";
 import { readFile, realpath, stat } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, type Server } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
+import { BlockList } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import express, { type ErrorRequestHandler } from "express";
@@ -27,28 +29,37 @@ const terminalAdminRoutes = {
   },
 };
 
-async function readToken(file: string): Promise<string> {
+async function readSecret(file: string, label: string): Promise<Buffer> {
   const entry = await stat(file);
   if (!entry.isFile() || (process.getuid && (entry.uid !== process.getuid() || (entry.mode & 0o077) !== 0))) {
-    throw new Error("admin token file must be owned by the service user with mode 0600");
+    throw new Error(`${label} must be owned by the service user with mode 0600`);
   }
-  const token = (await readFile(file, "utf8")).trim();
+  return readFile(file);
+}
+
+async function readToken(file: string): Promise<string> {
+  const token = (await readSecret(file, "admin token file")).toString("utf8").trim();
   if (!tokenPattern.test(token)) throw new Error("admin token must contain 64 lowercase hex characters");
   return token;
 }
 
-export function createAdminApp(config: Config) {
+export function createAdminApp(config: Config, lan?: { authority: string; clients: BlockList }) {
   const admin = config.admin!;
   const keys = config.keys!;
   const app = express();
   app.disable("x-powered-by");
   app.use((req, res, next) => {
-    const host = req.headers.host ?? "";
-    if (!/^(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?$/u.test(host)) {
+    const hosts = req.headersDistinct.host;
+    const host = hosts?.length === 1 ? hosts[0]! : "";
+    const allowed = lan
+      ? host === lan.authority && lan.clients.check(req.socket.remoteAddress ?? "", "ipv4")
+      : /^(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?$/u.test(host);
+    if (!allowed) {
       res.status(403).end();
       return;
     }
-    if (req.headers.origin && req.headers.origin !== `http://${host}`) {
+    const origins = req.headersDistinct.origin;
+    if (origins && (origins.length !== 1 || origins[0] !== `${lan ? "https" : "http"}://${host}`)) {
       res.status(403).end();
       return;
     }
@@ -212,17 +223,48 @@ export function createAdminApp(config: Config) {
   return app;
 }
 
-export async function startAdminServer(config: Config): Promise<() => Promise<void>> {
-  await readToken(config.admin!.tokenFile);
-  const server = createServer(createAdminApp(config));
-  await new Promise<void>((resolve, reject) => {
+function listen(server: Server, host: string, port: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
     server.once("error", reject);
-    server.listen(config.admin!.port, "127.0.0.1", () => {
+    server.listen(port, host, () => {
       server.off("error", reject);
       resolve();
     });
   });
-  return () => new Promise<void>((resolve, reject) => {
+}
+
+function closeServer(server: Server): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
   });
+}
+
+export async function startAdminServer(config: Config): Promise<() => Promise<void>> {
+  const admin = config.admin!;
+  await readToken(admin.tokenFile);
+  const local = createServer(createAdminApp(config));
+  const lan = admin.lan;
+  if (!lan) {
+    await listen(local, "127.0.0.1", admin.port);
+    return () => closeServer(local);
+  }
+
+  const port = lan.port ?? admin.port;
+  const authority = port === 443 ? lan.address : `${lan.address}:${port}`;
+  const [network, mask] = lan.subnet.split("/") as [string, string];
+  const clients = new BlockList();
+  clients.addSubnet(network, Number(mask), "ipv4");
+  const [cert, key] = await Promise.all([readFile(lan.certFile), readSecret(lan.keyFile, "LAN TLS key file")]);
+  if (!new X509Certificate(cert).checkIP(lan.address)) {
+    throw new Error("LAN TLS certificate must list the configured IP in its subject alternative names");
+  }
+  const tls = createHttpsServer({ cert, key, minVersion: "TLSv1.2" }, createAdminApp(config, { authority, clients }));
+  await listen(local, "127.0.0.1", admin.port);
+  try {
+    await listen(tls, lan.address, port);
+  } catch (error) {
+    await closeServer(local);
+    throw error;
+  }
+  return async () => { await Promise.all([closeServer(local), closeServer(tls)]); };
 }

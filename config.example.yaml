@@ -19,6 +19,11 @@ audit:
 #   port: 8788
 #   tokenFile: .data/admin-token
 #   terminalAdminPort: 8766
+#   lan:
+#     address: 192.168.1.50
+#     subnet: 192.168.1.0/24
+#     certFile: .data/admin-lan.crt
+#     keyFile: .data/admin-lan.key
 
 # Required only for the intranet Streamable HTTP server.
 http:

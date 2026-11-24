@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { BlockList } from "node:net";
 import path from "node:path";
 import { parseDocument } from "yaml";
 import { z } from "zod";
@@ -35,6 +36,24 @@ const hostSchema = z.object({
   operations: z.array(z.string().regex(safeId)).min(1),
 }).strict();
 
+const adminLanSchema = z.object({
+  address: z.ipv4(),
+  subnet: z.cidrv4(),
+  port: z.number().int().min(1).max(65535).optional(),
+  certFile: z.string().min(1),
+  keyFile: z.string().min(1),
+}).strict().refine(({ address, subnet }) => {
+  const [network, mask] = subnet.split("/") as [string, string];
+  const prefix = Number(mask);
+  const [first, second = 0] = network.split(".").map(Number);
+  const privatePrefix = first === 10 ? 8 : first === 172 && second >= 16 && second <= 31 ? 12
+    : first === 192 && second === 168 ? 16 : undefined;
+  if (privatePrefix === undefined || prefix < privatePrefix) return false;
+  const clients = new BlockList();
+  clients.addSubnet(network, prefix, "ipv4");
+  return clients.check(address, "ipv4");
+}, "LAN admin requires a private IPv4 address within its private client subnet");
+
 const configSchema = z.object({
   version: z.literal(1),
   ssh: z.object({
@@ -57,6 +76,7 @@ const configSchema = z.object({
     port: z.number().int().min(1).max(65535).default(8788),
     tokenFile: z.string().min(1).default(".data/admin-token"),
     terminalAdminPort: z.number().int().min(1).max(65535).optional(),
+    lan: adminLanSchema.optional(),
   }).strict().optional(),
   http: z.object({
     host: z.string().min(1).default("127.0.0.1"),
@@ -126,6 +146,10 @@ export async function loadConfig(configPath: string): Promise<Config> {
   if (config.admin) {
     if (!config.keys) throw new Error("admin requires a keys section");
     config.admin.tokenFile = resolveConfiguredPath(config.admin.tokenFile, baseDir);
+    if (config.admin.lan) {
+      config.admin.lan.certFile = resolveConfiguredPath(config.admin.lan.certFile, baseDir);
+      config.admin.lan.keyFile = resolveConfiguredPath(config.admin.lan.keyFile, baseDir);
+    }
   }
   if (config.http) config.http.tokenStoreFile = resolveConfiguredPath(config.http.tokenStoreFile, baseDir);
   for (const host of Object.values(config.hosts)) {

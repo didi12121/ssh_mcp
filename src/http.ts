@@ -205,6 +205,10 @@ async function main(): Promise<void> {
   const running = await startHttpMcpServer(config);
   console.error(`local-ssh-mcp listening on http://${config.http.host}:${config.http.port}/mcp`);
   if (config.admin) console.error(`Key administration listening on http://127.0.0.1:${config.admin.port}/`);
+  if (config.admin?.lan) {
+    const { address, subnet, port = config.admin.port } = config.admin.lan;
+    console.error(`LAN administration listening on https://${address}:${port}/ for ${subnet}`);
+  }
   const shutdown = async (): Promise<void> => {
     await running.close();
     process.exit(0);

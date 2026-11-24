@@ -105,6 +105,9 @@ try {
   assert.equal(await evaluate("document.querySelector('#sections').children.length"), 3);
   await click("nav-connections");
   await until(() => evaluate("!document.getElementById('connection-form').hidden"));
+  await evaluate("document.querySelector('#connection-tmux-help summary').click()");
+  assert.equal(await evaluate("document.querySelector('#connection-tmux-help').open"), true);
+  assert.ok((await evaluate("document.querySelector('#connection-tmux-help').innerText")).includes("sudo apt install tmux python3"));
   await fill("connection-name", "Browser profile");
   await fill("connection-host", "example.internal");
   await fill("connection-user", "fixture");

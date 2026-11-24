@@ -92,7 +92,7 @@ function connectionRow(profile) {
   const test = element("button", "测试连接", "quiet");
   test.addEventListener("click", () => action(test, async () => {
     const result = await connectionAction(`/${profile.profile_id}/test`, { method: "POST" });
-    message(`${profile.name} 已通过 SSH 验证，延迟 ${result.latency_ms} ms。${result.tmux_available ? "目标已安装 tmux。" : "目标未安装 tmux。"}`);
+    message(`${profile.name} 已通过 SSH 验证，延迟 ${result.latency_ms} ms。${result.tmux_available ? "目标已检测到 tmux。" : "目标 SSH 环境未检测到 tmux。安装步骤见「新增连接」表单。"}`);
   }));
   const edit = element("button", "编辑", "quiet");
   edit.addEventListener("click", () => editConnection(profile));

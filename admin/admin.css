@@ -68,6 +68,10 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #0c1420; paddi
 #token-copy { margin-top: 10px; }
 #token-dialog-status { color: var(--accent); }
 .target-fields { display: grid; grid-template-columns: minmax(0, 1fr) 100px; gap: 12px; }
+.host-key-help { margin-top: 8px; padding: 9px 11px; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); font-size: .87rem; overflow-wrap: anywhere; }
+.host-key-help p { margin: 0; }
+.host-key-help details { margin-top: 5px; }
+.host-key-help ol { margin: 6px 0; padding-inline-start: 1.5em; }
 #copy-install { margin-top: 10px; }
 #install-command { overflow-wrap: anywhere; font-size: .86rem; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }

@@ -92,7 +92,28 @@
         <label for="connection-name">连接名称</label>
         <input id="connection-name" name="name" required maxlength="100">
         <label for="connection-host">SSH 地址</label>
-        <input id="connection-host" name="host" required maxlength="253" placeholder="主机名或 IP">
+        <input id="connection-host" name="host" required maxlength="253" placeholder="主机名或 IP" aria-describedby="connection-host-key-hint">
+        <div class="host-key-help">
+          <p id="connection-host-key-hint">首次连接时，请在 MCP 服务端的 <code>known_hosts</code> 登记已核验的目标主机公钥，再测试连接。</p>
+          <details>
+            <summary>如何核对并登记主机指纹</summary>
+            <ol>
+              <li>通过目标服务器的控制台或已有可信终端运行 <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code>，核对 ED25519 指纹。</li>
+              <li>核对后，将目标服务器的主机公钥加入 MCP 服务端 <code>PTMCP_KNOWN_HOSTS</code> 指定的文件，使用表单中填写的地址。非默认端口使用 <code>[主机]:端口</code>。</li>
+            </ol>
+            <p>「安装公钥」更新目标账号的 <code>authorized_keys</code>，用于允许该账号登录。若已有主机指纹发生变化，请先确认变更原因，再更新记录。</p>
+          </details>
+          <details id="connection-tmux-help">
+            <summary>在目标服务器安装 tmux</summary>
+            <p>持久终端需要目标服务器提供 <code>tmux</code> 和 <code>python3</code>。登录目标服务器后，用 <code>cat /etc/os-release</code> 确认发行版，再选择安装命令。以 root 登录时去掉 <code>sudo</code>。</p>
+            <p>Ubuntu / Debian</p>
+            <pre><code>sudo apt update
+sudo apt install tmux python3</code></pre>
+            <p>Fedora</p>
+            <pre><code>sudo dnf install tmux python3</code></pre>
+            <p>安装后执行 <code>tmux -V</code>，再回到管理页点「测试连接」。如果仍未检测到，请检查 SSH 登录账号的 <code>PATH</code>。</p>
+          </details>
+        </div>
         <div class="target-fields">
           <div>
             <label for="connection-user">SSH 用户</label>

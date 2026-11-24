@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { createServer, type Server } from "node:http";
+import { createServer, get, type Server } from "node:http";
+import { BlockList } from "node:net";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -32,6 +33,7 @@ test("identity proxy authenticates and only forwards allowlisted routes and quer
   const temp = await mkdtemp(path.join(os.tmpdir(), "ssh-mcp-admin-identity-"));
   const port = await listen(upstream);
   let server: Server | undefined;
+  let lanServer: Server | undefined;
   try {
     await writeFile(path.join(temp, "admin-token"), admin, { mode: 0o600 });
     const config = path.join(temp, "config.yaml");
@@ -45,7 +47,8 @@ hosts:
 operations:
   uptime: { description: Read uptime, command: [uptime], readOnly: true }
 `);
-    server = createServer(createAdminApp(await loadConfig(config)));
+    const settings = await loadConfig(config);
+    server = createServer(createAdminApp(settings));
     const base = `http://127.0.0.1:${await listen(server)}`;
     const auth = { Authorization: `Bearer ${admin}` };
     assert.equal((await fetch(`${base}/api/tokens`)).status, 401);
@@ -65,7 +68,27 @@ operations:
       { url: "/admin/tokens?catalog=1", idempotency: undefined },
       { url: "/admin/tokens", idempotency: requestId },
     ]);
+
+    const clients = new BlockList();
+    clients.addSubnet("192.168.50.0", 24);
+    const authority = "192.168.50.20:8788";
+    lanServer = createServer(createAdminApp(settings, { authority, clients }));
+    const lanBase = `http://127.0.0.1:${await listen(lanServer)}`;
+    const status = (route: string, headers: Record<string, string>) => new Promise<number | undefined>((resolve, reject) => {
+      get(lanBase + route, { headers }, (response) => {
+        response.resume();
+        resolve(response.statusCode);
+      }).on("error", reject);
+    });
+    const host = { Host: authority };
+    assert.equal(await status("/", host), 403);
+    clients.addAddress("127.0.0.1");
+    assert.equal(await status("/", { Host: "untrusted.example" }), 403);
+    assert.equal(await status("/", { ...host, Origin: `http://${authority}` }), 403);
+    assert.equal(await status("/", { ...host, Origin: `https://${authority}` }), 200);
+    assert.equal(await status("/api/keys", host), 401);
   } finally {
+    if (lanServer) await close(lanServer);
     if (server) await close(server);
     await close(upstream);
     await rm(temp, { recursive: true, force: true });
